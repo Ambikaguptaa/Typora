@@ -4,11 +4,14 @@ Main Streamlit Application Entrypoint.
 Complete Functional Research Workstation & Analytics Console.
 """
 
+print("[STARTUP STEP 1] Initializing application environment and standard libraries...", flush=True)
 from datetime import datetime
 import json
 from pathlib import Path
 import sys
 from typing import Any, Dict, List, Optional
+
+print("[STARTUP STEP 2] Loading scientific and UI libraries (numpy, pandas, plotly, streamlit)...", flush=True)
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -20,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+print("[STARTUP STEP 3] Loading database persistence layer (pg8000 pure-python driver)...", flush=True)
 from database.database import (
     DatabaseHealth,
     check_connection,
@@ -27,6 +31,8 @@ from database.database import (
     get_database_config_diagnostics,
     init_db,
 )
+
+print("[STARTUP STEP 4] Loading behavioral and ML feature pipeline modules...", flush=True)
 from src.assessment.report_generator import generate_markdown_report, generate_text_report
 from src.config.settings import settings
 from src.data_engineering.baseline import (
@@ -100,6 +106,8 @@ from src.visualization.dashboard import (
 )
 from src.visualization.theme import apply_workstation_theme
 
+print("[STARTUP STEP 5] App module imports completed successfully.", flush=True)
+
 # Configure Streamlit page
 st.set_page_config(
     page_title="Workstation | Mental-State Detection System",
@@ -148,9 +156,9 @@ def render_sidebar(engine: BehavioralEngine) -> str:
             unsafe_allow_html=True,
         )
         nav_options = [
-            "1. ⏱️ Live Assessment",
-            "2. 🔬 Session Analytics",
-            "3. 👤 Personal Baseline",
+            "1. 📋 Overview",
+            "2. ⌨️ Live Session",
+            "3. 📊 Baseline Analytics",
             "4. 🧠 Behavioral Model",
             "5. 📜 Session History",
             "6. 📑 Reports",
@@ -167,7 +175,9 @@ def render_sidebar(engine: BehavioralEngine) -> str:
         st.markdown("<hr style='border: none; border-top: 1px solid #242B36; margin: 14px 0;'>", unsafe_allow_html=True)
 
         settings.ensure_directories()
+        print("[STARTUP STEP 8] Ensuring database is initialized (lazy cached)...", flush=True)
         ensure_database_initialized()
+        print("[STARTUP STEP 9] Evaluating database health (cached)...", flush=True)
         health = get_cached_database_health()
         db_alive = bool(health)
         db_led = "ready" if db_alive else "critical"
@@ -1469,27 +1479,32 @@ Sandboxed HTML5 Focus Canvas (Zero Global OS Hooks)
 # ==============================================================================
 def main() -> None:
     """Main application orchestrator."""
+    print("[STARTUP STEP 6] Initializing singleton BehavioralEngine state...", flush=True)
     engine = get_engine()
-    selected_nav = render_sidebar(engine)
-
-    if selected_nav == "1. 📋 Overview":
+    print("[STARTUP STEP 7] Rendering workstation sidebar...", flush=True)
+    safe_nav = selected_nav.encode("ascii", "replace").decode("ascii")
+    print(f"[STARTUP STEP 10] Rendering active workstation console page: {safe_nav}...", flush=True)
+    if "Overview" in selected_nav or selected_nav.startswith("1."):
         render_overview_page(engine)
-    elif selected_nav == "2. ⌨️ Live Session":
+    elif "Live" in selected_nav or selected_nav.startswith("2.") or "Assessment" in selected_nav or "Session" in selected_nav:
         render_live_session_page(engine)
-    elif selected_nav == "3. 📊 Baseline Analytics":
+    elif "Baseline" in selected_nav or selected_nav.startswith("3."):
         render_baseline_analytics_page(engine)
-    elif selected_nav == "4. 🧠 Behavioral Model":
+    elif "Model" in selected_nav or selected_nav.startswith("4."):
         render_behavioral_model_page(engine)
-    elif selected_nav == "5. 📜 Session History":
+    elif "History" in selected_nav or selected_nav.startswith("5."):
         render_session_history_page()
-    elif selected_nav == "6. 📑 Reports":
+    elif "Reports" in selected_nav or selected_nav.startswith("6."):
         render_reports_page()
-    elif selected_nav == "7. 🔒 Privacy & Security":
+    elif "Privacy" in selected_nav or selected_nav.startswith("7."):
         render_privacy_security_page()
-    elif selected_nav == "8. 🔬 Dataset / System Status":
+    elif "Dataset" in selected_nav or selected_nav.startswith("8.") or "Status" in selected_nav:
         render_dataset_system_status_page()
-    elif selected_nav == "9. 🧩 Architecture & Roadmap":
+    elif "Architecture" in selected_nav or selected_nav.startswith("9.") or "Roadmap" in selected_nav:
         render_architecture_page()
+    else:
+        render_overview_page(engine)
+    print("[STARTUP STEP 11] Workstation console render cycle completed successfully.", flush=True)
 
 
 if __name__ == "__main__":

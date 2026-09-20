@@ -216,12 +216,18 @@ def log_database_diagnostics(
     msg_lines = [
         "=== DATABASE CONNECTION DIAGNOSTIC ===",
         f"DATABASE CONFIG SOURCE: {src}",
+        f"BACKEND: {backend_type.upper()}",
         f"DB BACKEND: {backend_type}",
+        f"HOST: {masked_h}",
         f"DB HOST: {masked_h}",
+        f"PORT: {port or 'N/A'}",
         f"DB PORT: {port or 'N/A'}",
-        f"DB USER: {masked_u}",
+        f"DB: {database_name or 'N/A'}",
         f"DB NAME: {database_name or 'N/A'}",
+        f"USER: {masked_u}",
+        f"DB USER: {masked_u}",
         f"DRIVER: {driver_str}",
+        f"HEALTH CHECK: {connection_verdict}",
         f"DATABASE CONNECTION: {connection_verdict}",
         f"POOLER DETECTED: {pooler_flag}",
         f"DIRECT SUPABASE HOST DETECTED: {direct_flag}",
@@ -456,6 +462,7 @@ def get_connection(
             is_pooler=diag.get("is_pooler"),
             is_direct_supabase=diag.get("is_direct_supabase"),
             driver="pg8000",
+            conn_result="INITIALIZING",
         )
 
         try:
@@ -471,6 +478,19 @@ def get_connection(
             if hasattr(conn, "autocommit"):
                 conn.autocommit = False
             logger.info("[DATABASE SUCCESS] PostgreSQL connection established successfully via pg8000.")
+            log_database_diagnostics(
+                backend_type="postgresql",
+                host=diag["host"],
+                port=diag["port"],
+                database_name=diag["database_name"],
+                username=diag["username"],
+                has_database_url=diag["has_database_url"],
+                config_source=diag.get("config_source"),
+                is_pooler=diag.get("is_pooler"),
+                is_direct_supabase=diag.get("is_direct_supabase"),
+                driver="pg8000",
+                conn_result="SUCCESS",
+            )
             return conn
         except Exception as pg_err:
             exc_type = type(pg_err).__name__
