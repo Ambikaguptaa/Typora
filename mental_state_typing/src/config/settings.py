@@ -13,9 +13,71 @@ from dotenv import load_dotenv
 # Base directory points to the root of mental_state_typing/
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
-# Load environment variables from .env file if present
+# Capture pre-existing environment variable set by deployment container or CLI
+_INITIAL_OS_ENV_DATABASE_URL = os.environ.get("DATABASE_URL")
+
+# Load environment variables from .env file if present (never override deployment environment)
 ENV_PATH = BASE_DIR / ".env"
-load_dotenv(dotenv_path=ENV_PATH)
+load_dotenv(dotenv_path=ENV_PATH, override=False)
+
+
+def is_cloud_environment() -> bool:
+    """Detect if application is running in Streamlit Cloud or cloud container environment."""
+    cloud_markers = [
+        "STREAMLIT_SERVER_ENVIRONMENT",
+        "STREAMLIT_SHARING_MODE",
+        "STREAMLIT_COMMUNITY_CLOUD",
+        "IS_STREAMLIT_CLOUD",
+        "STREAMLIT_CLOUD",
+    ]
+    if any(os.environ.get(k) for k in cloud_markers):
+        return True
+
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets"):
+            try:
+                sec = st.secrets
+                if sec is not None and bool(sec):
+                    return True
+            except (FileNotFoundError, Exception):
+                pass
+    except Exception:
+        pass
+
+    return False
+
+
+def to_canonical_source(source_str: str) -> str:
+    """Convert any configuration source string into standard canonical label."""
+    s = str(source_str).upper()
+    if "STREAMLIT" in s or "SECRET" in s:
+        return "STREAMLIT_SECRET"
+    if "LOCAL_DOTENV" in s or "DOTENV" in s or ".ENV" in s:
+        return "LOCAL_DOTENV"
+    if "ENVIRONMENT" in s or "ENV" in s:
+        return "ENVIRONMENT"
+    if "SQLITE" in s or "FALLBACK" in s:
+        return "SQLITE_FALLBACK"
+    return "ENVIRONMENT"
+
+
+def _read_dotenv_database_url() -> Optional[str]:
+    """Read DATABASE_URL directly from .env file if present without touching os.environ."""
+    if ENV_PATH.is_file():
+        try:
+            with open(ENV_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("#") or not line:
+                        continue
+                    if line.startswith("DATABASE_URL="):
+                        val = line.split("=", 1)[1].strip().strip("'\"")
+                        if val:
+                            return val
+        except Exception:
+            pass
+    return None
 
 
 @dataclass(frozen=True)
@@ -53,13 +115,18 @@ class Settings:
         """Resolve active database URL, backend type, and configuration source with strict precedence.
 
         Deterministic Precedence:
-        1. Streamlit Secrets: st.secrets["DATABASE_URL"] (Uppercase canonical cloud secret)
-        2. Streamlit Secrets: st.secrets["database_url"] (Lowercase variant)
-        3. Streamlit Secrets: st.secrets["connections"]["postgresql"]["url"]
-        4. Streamlit Secrets: st.secrets["postgres"]["url"] or st.secrets["postgres"] table
-        5. Streamlit Secrets: st.secrets["postgresql"]["url"]
-        6. Environment Variable: os.environ["DATABASE_URL"]
-        7. Local SQLite fallback: database/mental_state.db
+        1. Streamlit Cloud root-level st.secrets["DATABASE_URL"] (Uppercase canonical cloud secret)
+        2. Streamlit Cloud root-level st.secrets["database_url"] (Lowercase variant)
+        3. Streamlit Cloud st.secrets["connections"]["postgresql"]["url"]
+        4. Streamlit Cloud st.secrets["postgres"]["url"] or st.secrets["postgres"] table
+        5. Streamlit Cloud st.secrets["postgresql"]["url"]
+        6. Process Environment DATABASE_URL (os.environ["DATABASE_URL"])
+        7. Local .env DATABASE_URL
+        8. Local SQLite fallback (database/mental_state.db)
+
+        Cloud Mode Rule:
+        When running on Streamlit Cloud (st.secrets present or cloud env detected),
+        the application NEVER silently falls back to SQLite.
         """
         # 1-5: Check Streamlit secrets first (authoritative in cloud deployments)
         try:
@@ -116,13 +183,26 @@ class Settings:
         except Exception:
             pass
 
-        # 6. Explicit environment variable (from os.environ or loaded .env)
+        # 6. Process Environment variable
         env_url = (os.environ.get("DATABASE_URL") or self.database_url or "").strip().strip("'\"")
+        dotenv_url = _read_dotenv_database_url()
+
         if env_url:
             backend = "postgresql" if env_url.startswith(("postgresql://", "postgres://")) else "sqlite"
+            if dotenv_url and env_url == dotenv_url and not _INITIAL_OS_ENV_DATABASE_URL:
+                return env_url, backend, "LOCAL_DOTENV"
             return env_url, backend, "DATABASE_URL FROM ENVIRONMENT"
 
-        # 7. Local SQLite fallback
+        # 7. Local .env file
+        if dotenv_url:
+            backend = "postgresql" if dotenv_url.startswith(("postgresql://", "postgres://")) else "sqlite"
+            return dotenv_url, backend, "LOCAL_DOTENV"
+
+        # Cloud Mode Protection: Never silently fall back to SQLite in cloud deployments
+        if is_cloud_environment():
+            return "", "postgresql", "CLOUD_CONFIG_ERROR: Missing DATABASE_URL secret in Streamlit Cloud"
+
+        # 8. Local SQLite fallback (local development only)
         sqlite_url = f"sqlite:///{self.database_path.resolve().as_posix()}"
         return sqlite_url, "sqlite", "LOCAL SQLITE FALLBACK"
 
@@ -136,9 +216,11 @@ class Settings:
         _, backend, _ = self.resolve_database_configuration()
         return backend
 
-    def get_database_source(self) -> str:
+    def get_database_source(self, canonical: bool = False) -> str:
         """Return the database configuration source label."""
         _, _, source = self.resolve_database_configuration()
+        if canonical:
+            return to_canonical_source(source)
         return source
 
     # Privacy & Anonymization

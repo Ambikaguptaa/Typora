@@ -1,6 +1,7 @@
 """Database package for local SQLite and cloud PostgreSQL persistence."""
 
 from database.database import (
+    ConfigurationError,
     DatabaseHealth,
     check_connection,
     check_database_health,
@@ -9,6 +10,7 @@ from database.database import (
     get_assessment_records,
     get_baseline_profile,
     get_connection,
+    get_database_config_diagnostics,
     get_db_cursor,
     init_db,
     parse_database_url,
@@ -20,6 +22,7 @@ from database.database import (
 )
 
 __all__ = [
+    "ConfigurationError",
     "DatabaseHealth",
     "check_connection",
     "check_database_health",
@@ -28,6 +31,7 @@ __all__ = [
     "get_assessment_records",
     "get_baseline_profile",
     "get_connection",
+    "get_database_config_diagnostics",
     "get_db_cursor",
     "init_db",
     "parse_database_url",

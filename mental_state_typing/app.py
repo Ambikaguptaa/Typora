@@ -20,7 +20,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from database.database import check_connection, check_database_health, init_db
+from database.database import (
+    check_connection,
+    check_database_health,
+    get_database_config_diagnostics,
+    init_db,
+)
 from src.assessment.report_generator import generate_markdown_report, generate_text_report
 from src.config.settings import settings
 from src.data_engineering.baseline import (
@@ -1208,6 +1213,81 @@ def render_dataset_system_status_page() -> None:
         subtitle="Raw Keystroke Repository Audit & Production Training Pre-Flight Validation",
         status_text="DATASET REPOSITORY",
         status_type="warning",
+    )
+
+    # Database Deployment Diagnostics & Status (Step 14)
+    db_diag = get_database_config_diagnostics()
+    conn_color = "#45E0A8" if db_diag["connection"] == "READY" else "#FF667A"
+    conn_led = "ready" if db_diag["connection"] == "READY" else "critical"
+
+    st.markdown(
+        """
+        <div class="console-card">
+            <div class="console-card-header">
+                <span>DATABASE DEPLOYMENT DIAGNOSTICS & SYSTEM STATUS</span>
+            </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    col_db1, col_db2, col_db3 = st.columns(3)
+    with col_db1:
+        st.markdown(
+            f"""
+            <div class="recessed-panel">
+                <div class="readout-label">DATABASE BACKEND</div>
+                <div style="font-size: 1.1rem; font-weight: 700; color: #E9EEF5; margin: 4px 0;">
+                    {db_diag['backend']}
+                </div>
+                <div style="font-size: 0.8rem; color: #9BA3AF;">
+                    Port: {db_diag['port']}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_db2:
+        st.markdown(
+            f"""
+            <div class="recessed-panel">
+                <div class="readout-label">CONFIG SOURCE</div>
+                <div style="font-size: 1.05rem; font-weight: 700; color: #4FA8FF; margin: 4px 0;">
+                    {db_diag['configuration_source']}
+                </div>
+                <div style="font-size: 0.8rem; color: #9BA3AF;">
+                    Pooler Mode: {db_diag['pooler']}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_db3:
+        st.markdown(
+            f"""
+            <div class="recessed-panel">
+                <div class="readout-label">CONNECTION STATUS</div>
+                <div style="font-size: 1.1rem; font-weight: 700; color: {conn_color}; margin: 4px 0; display: flex; align-items: center; gap: 6px;">
+                    <span class="led-dot {conn_led}"></span> {db_diag['connection']}
+                </div>
+                <div style="font-size: 0.8rem; color: #9BA3AF;">
+                    Status: {db_diag['status_code']}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    diag_err_html = f"<div style='color: #FF667A; margin-top: 6px;'><strong>DIAGNOSTIC DETAIL:</strong> {db_diag['health_message']}</div>" if db_diag['connection'] == 'ERROR' else ""
+    st.markdown(
+        f"""
+        <div style="margin-top: 10px; font-family: monospace; font-size: 0.78rem; color: #9BA3AF; background: #0B0E14; padding: 10px 14px; border-radius: 4px; border: 1px solid #1E232D;">
+            <div><strong>HOST:</strong> <span style="color: #E9EEF5;">{db_diag['hostname']}</span></div>
+            <div><strong>PORT:</strong> <span style="color: #E9EEF5;">{db_diag['port']}</span> &nbsp;|&nbsp; <strong>DATABASE:</strong> <span style="color: #E9EEF5;">{db_diag['database']}</span> &nbsp;|&nbsp; <strong>USERNAME:</strong> <span style="color: #E9EEF5;">{db_diag['username']}</span></div>
+            <div><strong>POOLER:</strong> <span style="color: #E9EEF5;">{db_diag['pooler']}</span> &nbsp;|&nbsp; <strong>POOLER DETECTED:</strong> <span style="color: #E9EEF5;">{db_diag['pooler_detected']}</span> &nbsp;|&nbsp; <strong>DIRECT SUPABASE DETECTED:</strong> <span style="color: #E9EEF5;">{db_diag['direct_supabase_host_detected']}</span></div>
+            {diag_err_html}
+        </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     ds_report = get_dataset_status()

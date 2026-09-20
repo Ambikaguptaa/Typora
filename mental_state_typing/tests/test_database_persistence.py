@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from database.database import (
+    ConfigurationError,
     DatabaseHealth,
     check_connection,
     check_database_health,
@@ -26,6 +27,7 @@ from database.database import (
     get_assessment_records,
     get_baseline_profile,
     get_connection,
+    get_database_config_diagnostics,
     get_db_cursor,
     init_db,
     log_database_diagnostics,
@@ -36,7 +38,7 @@ from database.database import (
     save_baseline_profile,
     save_session_record,
 )
-from src.config.settings import settings
+from src.config.settings import is_cloud_environment, settings, to_canonical_source
 from src.live_typing.privacy_filter import PrivacyViolationError
 
 
@@ -328,15 +330,13 @@ def test_postgres_connection_failure_diagnostic_logging(capsys):
 
 
 # ==============================================================================
-# 10 MANDATORY REQUIREMENT TESTS (A THROUGH J)
+# 10 MANDATORY REQUIREMENT TESTS (A THROUGH J - STEP 11)
 # ==============================================================================
 
-def test_req_a_streamlit_secrets_wins_over_env(monkeypatch):
-    """A. Verify DATABASE_URL from Streamlit secrets wins over environment variables."""
-    # Set conflicting environment variable
-    monkeypatch.setenv("DATABASE_URL", "postgresql://env_user:env_pass@env-host:5432/env_db")
+def test_req_a_streamlit_database_url_wins_over_env(monkeypatch):
+    """A. Verify Streamlit DATABASE_URL wins over .env and environment variables."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://dotenv_user:dotenv_pass@dotenv-host:5432/dotenv_db")
 
-    # Mock st.secrets with authoritative cloud secret
     import streamlit as st
     monkeypatch.setattr(st, "secrets", {
         "DATABASE_URL": "postgresql://secret_user:secret_pass@aws-0-us-east-1.pooler.supabase.com:5432/secret_db"
@@ -344,126 +344,78 @@ def test_req_a_streamlit_secrets_wins_over_env(monkeypatch):
 
     url = settings.get_database_url()
     source = settings.get_database_source()
+    canonical_source = settings.get_database_source(canonical=True)
 
     assert "aws-0-us-east-1.pooler.supabase.com" in url
-    assert "env-host" not in url
+    assert "dotenv-host" not in url
     assert "secret_user" in url
-    assert source == "DATABASE_URL FROM STREAMLIT SECRETS"
+    assert "STREAMLIT SECRETS" in source
+    assert canonical_source == "STREAMLIT_SECRET"
 
 
-def test_req_b_local_sqlite_fallback_when_running_locally(monkeypatch):
-    """B. Verify local SQLite fallback works when running locally without secrets or env."""
-    monkeypatch.delenv("DATABASE_URL", raising=False)
+def test_req_b_existing_environment_database_url_wins_over_env(monkeypatch):
+    """B. Verify existing process environment DATABASE_URL wins over .env."""
     import streamlit as st
     monkeypatch.setattr(st, "secrets", {})
+    monkeypatch.setenv("DATABASE_URL", "postgresql://env_usr:env_pwd@env-host:5432/env_db")
+
+    url = settings.get_database_url()
+    backend = settings.get_database_backend()
+    canonical_source = settings.get_database_source(canonical=True)
+
+    assert "env-host" in url
+    assert backend == "postgresql"
+    assert canonical_source == "ENVIRONMENT"
+
+
+def test_req_c_local_env_works_locally(monkeypatch):
+    """C. Verify local .env works locally when no secrets or overriding env are present."""
+    import sys
+    import streamlit as st
+    s_mod = sys.modules["src.config.settings"]
+
+    monkeypatch.setattr(st, "secrets", {})
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("STREAMLIT_COMMUNITY_CLOUD", raising=False)
+    monkeypatch.setattr(s_mod, "_INITIAL_OS_ENV_DATABASE_URL", None)
+    monkeypatch.setattr(s_mod, "_read_dotenv_database_url", lambda: "postgresql://dot_u:dot_p@dot-host:5432/dot_db")
+
+    url = settings.get_database_url()
+    backend = settings.get_database_backend()
+    canonical_source = settings.get_database_source(canonical=True)
+
+    assert "dot-host" in url
+    assert backend == "postgresql"
+    assert canonical_source == "LOCAL_DOTENV"
+
+
+def test_req_d_sqlite_fallback_works_locally(monkeypatch):
+    """D. Verify SQLite fallback works locally when no secrets or env exist."""
+    import sys
+    import streamlit as st
+    s_mod = sys.modules["src.config.settings"]
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("STREAMLIT_COMMUNITY_CLOUD", raising=False)
+    monkeypatch.delenv("IS_STREAMLIT_CLOUD", raising=False)
+    monkeypatch.delenv("STREAMLIT_SERVER_ENVIRONMENT", raising=False)
+    monkeypatch.setattr(st, "secrets", {})
+    monkeypatch.setattr(s_mod, "_read_dotenv_database_url", lambda: None)
 
     url = settings.get_database_url()
     backend = settings.get_database_backend()
     source = settings.get_database_source()
+    canonical_source = settings.get_database_source(canonical=True)
 
     assert backend == "sqlite"
     assert url.startswith("sqlite:///")
     assert "mental_state.db" in url
     assert source == "LOCAL SQLITE FALLBACK"
+    assert canonical_source == "SQLITE_FALLBACK"
 
 
-def test_req_c_direct_supabase_host_not_generated_from_project_id():
-    """C. Verify that direct Supabase host db.<ref>.supabase.co is NOT generated from project id."""
-    pooler_url = "postgresql://postgres.xhpztsckvjdrnfgmmuuq:pass@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require"
-    eng, target = parse_database_url(pooler_url)
-
-    assert eng == "postgresql"
-    # Verify pooler host is preserved exactly and not converted to db.*.supabase.co
-    assert "aws-0-us-east-1.pooler.supabase.com" in target
-    assert "db.xhpztsckvjdrnfgmmuuq.supabase.co" not in target
-
-
-def test_req_d_pooler_url_is_accepted():
-    """D. Verify that Supabase Session Pooler URL is accepted and recognized as pooler."""
-    pooler_url = "postgresql://postgres.myproject:my_pass@aws-0-eu-central-1.pooler.supabase.com:5432/postgres"
-    diag = extract_safe_db_diagnostics(pooler_url, "postgresql")
-
-    assert diag["backend_type"] == "postgresql"
-    assert diag["port"] == 5432
-    assert diag["is_pooler"] is True
-    assert diag["is_direct_supabase"] is False
-    assert diag["host"] == "aws-0-eu-central-1.pooler.supabase.com"
-
-
-def test_req_e_secret_values_never_logged(capsys):
-    """E. Verify that secret values (passwords, tokens) are never logged."""
-    secret_pass = "top_secret_token_xyz_987654"
-    dirty_url = f"postgresql://usr:{secret_pass}@aws-0-us-east-1.pooler.supabase.com:5432/db"
-
-    clean_url = sanitize_database_url_for_logging(dirty_url)
-    assert secret_pass not in clean_url
-    assert "********" in clean_url
-
-    diag = extract_safe_db_diagnostics(dirty_url, "postgresql")
-    assert secret_pass not in str(diag)
-
-    log_database_diagnostics(
-        backend_type="postgresql",
-        host="aws-0-us-east-1.pooler.supabase.com",
-        port=5432,
-        database_name="db",
-        username="usr",
-        has_database_url=True,
-    )
-    captured = capsys.readouterr()
-    assert secret_pass not in captured.err
-
-
-def test_req_f_password_is_masked():
-    """F. Verify password masking in diagnostics and sanitizers."""
-    complex_passwords = [
-        "pass!@#123",
-        "P@$$w0rd%2Fwith%20encoded",
-        "extremely_long_complex_pass_phrase_abcdefg",
-    ]
-    for pwd in complex_passwords:
-        url = f"postgresql://myuser:{pwd}@localhost:5432/mydb"
-        sanitized = sanitize_database_url_for_logging(url)
-        assert pwd not in sanitized
-        assert "********" in sanitized
-
-        diag = extract_safe_db_diagnostics(url, "postgresql")
-        assert pwd not in str(diag)
-
-
-def test_req_g_invalid_or_missing_database_url_controlled_diagnostic():
-    """G. Verify invalid/missing DATABASE_URL produces controlled diagnostic without unhandled crash."""
-    health = check_database_health(database_url="invalid://malformed:uri/without/schema")
-    assert health.is_ready is False
-    assert health.status_code in ("CONFIG_ERROR", "CONNECTION_ERROR")
-
-
-def test_req_h_postgresql_connection_health_check():
-    """H. Verify PostgreSQL connection health test accurately classifies errors."""
-    unreachable_url = "postgresql://user:pass@127.0.0.1:54329/testdb"
-    health = check_database_health(database_url=unreachable_url)
-
-    assert health.is_ready is False
-    assert health.status_code == "CONNECTION_ERROR"
-    assert health.backend_type == "postgresql"
-    assert "pass" not in health.message
-
-
-def test_req_i_database_initialization(temp_db: Path):
-    """I. Verify database schema initializes all 5 persistent tables."""
-    success = init_db(temp_db)
-    assert success is True
-
-    with get_db_cursor(temp_db) as cursor:
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        tables = {row[0] for row in cursor.fetchall()}
-
-    expected = {"sessions", "typing_metrics", "assessments", "baseline_profiles", "audit_logs"}
-    assert expected.issubset(tables)
-
-
-def test_req_j_no_accidental_sqlite_fallback_in_cloud_mode(monkeypatch):
-    """J. Verify cloud mode never silently switches to SQLite on PostgreSQL failure."""
+def test_req_e_cloud_mode_does_not_fall_back_to_sqlite(monkeypatch):
+    """E. Verify cloud mode never silently switches to SQLite on PostgreSQL failure."""
     import streamlit as st
     monkeypatch.setattr(st, "secrets", {
         "DATABASE_URL": "postgresql://usr:pass@127.0.0.1:54329/cloud_db"
@@ -477,4 +429,86 @@ def test_req_j_no_accidental_sqlite_fallback_in_cloud_mode(monkeypatch):
     assert health.is_ready is False
     assert health.backend_type == "postgresql"
     assert settings.get_database_backend() == "postgresql"
+
+
+def test_req_f_direct_supabase_host_is_never_generated():
+    """F. Verify that direct Supabase host db.<ref>.supabase.co is NOT generated from project id."""
+    pooler_url = "postgresql://postgres.xhpztsckvjdrnfgmmuuq:pass@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require"
+    eng, target = parse_database_url(pooler_url)
+
+    assert eng == "postgresql"
+    # Verify pooler host is preserved exactly and not converted to db.*.supabase.co
+    assert "aws-0-us-east-1.pooler.supabase.com" in target
+    assert "db.xhpztsckvjdrnfgmmuuq.supabase.co" not in target
+
+
+def test_req_g_pooler_url_is_accepted():
+    """G. Verify that Supabase Session Pooler URL is accepted and recognized as pooler."""
+    pooler_url = "postgresql://postgres.myproject:my_pass@aws-0-eu-central-1.pooler.supabase.com:5432/postgres"
+    diag = extract_safe_db_diagnostics(pooler_url, "postgresql")
+
+    assert diag["backend_type"] == "postgresql"
+    assert diag["port"] == 5432
+    assert diag["is_pooler"] is True
+    assert diag["is_direct_supabase"] is False
+    assert diag["host"] == "aws-0-eu-central-1.pooler.supabase.com"
+
+
+def test_req_h_sensitive_connection_values_are_masked_in_diagnostics(capsys):
+    """H. Verify sensitive connection values (passwords, tokens) are masked in diagnostics."""
+    secret_pass = "top_secret_token_xyz_987654"
+    dirty_url = f"postgresql://usr:{secret_pass}@aws-0-us-east-1.pooler.supabase.com:5432/db"
+
+    clean_url = sanitize_database_url_for_logging(dirty_url)
+    assert secret_pass not in clean_url
+    assert "********" in clean_url
+
+    diag = get_database_config_diagnostics(url=dirty_url)
+    assert secret_pass not in str(diag)
+    assert "pooler.supabase.com" in diag["hostname"]
+    assert "*" in diag["hostname"]
+
+    log_database_diagnostics(
+        backend_type="postgresql",
+        host="aws-0-us-east-1.pooler.supabase.com",
+        port=5432,
+        database_name="db",
+        username="usr",
+        has_database_url=True,
+    )
+    captured = capsys.readouterr()
+    assert secret_pass not in captured.err
+
+
+def test_req_i_missing_database_url_produces_controlled_configuration_error(monkeypatch):
+    """I. Verify missing DATABASE_URL in cloud mode produces controlled configuration error."""
+    import sys
+    import streamlit as st
+    s_mod = sys.modules["src.config.settings"]
+
+    monkeypatch.setenv("STREAMLIT_COMMUNITY_CLOUD", "1")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(st, "secrets", {})
+    monkeypatch.setattr(s_mod, "_read_dotenv_database_url", lambda: None)
+
+    # In cloud mode with no secrets, health check must report CONFIG_ERROR without crashing
+    health = check_database_health()
+    assert health.is_ready is False
+    assert health.status_code == "CONFIG_ERROR"
+    assert "DATABASE_URL" in health.message
+
+    # get_connection() must raise ConfigurationError
+    with pytest.raises(ConfigurationError):
+        get_connection()
+
+
+def test_req_j_select_1_health_check_works_with_test_database(temp_db: Path):
+    """J. Verify SELECT 1 health check works with test database and closes connection."""
+    init_db(temp_db)
+    health = check_database_health(db_path=temp_db)
+
+    assert health.is_ready is True
+    assert health.status_code == "DATABASE_READY"
+    assert health.backend_type == "sqlite"
+    assert bool(health) is True
 

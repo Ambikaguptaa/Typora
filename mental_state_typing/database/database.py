@@ -21,7 +21,7 @@ import sys
 from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
-from src.config.settings import settings
+from src.config.settings import is_cloud_environment, settings, to_canonical_source
 from src.live_typing.privacy_filter import (
     FORBIDDEN_PAYLOAD_FIELDS,
     PrivacyViolationError,
@@ -29,6 +29,11 @@ from src.live_typing.privacy_filter import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class ConfigurationError(RuntimeError):
+    """Raised when database deployment configuration is invalid or missing in cloud mode."""
+    pass
 
 
 def sanitize_database_url_for_logging(url: str) -> str:
@@ -229,6 +234,70 @@ def log_database_diagnostics(
     print(formatted, file=sys.stderr, flush=True)
 
 
+def get_database_config_diagnostics(
+    url: Optional[str] = None,
+    db_path: Optional[Union[str, Path]] = None,
+) -> Dict[str, Any]:
+    """Extract safe database configuration diagnostics conforming to Steps 7 and 14.
+
+    Returns dictionary containing:
+    - backend: 'POSTGRESQL' / 'SQLITE'
+    - backend_type: 'postgresql' / 'sqlite'
+    - configuration_source: 'STREAMLIT_SECRET' / 'ENVIRONMENT' / 'LOCAL_DOTENV' / 'SQLITE_FALLBACK'
+    - hostname: masked host string only
+    - port: actual port number or 'N/A'
+    - database: actual database name
+    - username: masked username
+    - pooler_detected: bool
+    - pooler: 'SESSION' / 'DIRECT' / 'NONE'
+    - direct_supabase_host_detected: bool
+    - database_url_present: bool
+    - connection: 'READY' / 'ERROR'
+    - status_code: health status code
+    - health_message: sanitized error message if any
+    """
+    if db_path is not None:
+        target = str(db_path)
+        engine_type = "sqlite"
+    else:
+        engine_type, target = parse_database_url(url)
+
+    diag = extract_safe_db_diagnostics(target, engine_type)
+    health = check_database_health(db_path=db_path, database_url=url)
+
+    raw_host = diag.get("host", "N/A")
+    masked_h = mask_hostname_safely(raw_host) if raw_host != "N/A" else "N/A"
+    raw_user = diag.get("username", "N/A")
+    masked_u = mask_username_safely(raw_user) if raw_user != "N/A" else "N/A"
+    is_pooler = diag.get("is_pooler", False)
+    is_direct = diag.get("is_direct_supabase", False)
+
+    pooler_label = "SESSION" if is_pooler else ("DIRECT" if is_direct else "NONE")
+
+    return {
+        "backend": engine_type.upper(),
+        "backend_type": engine_type,
+        "configuration_source": to_canonical_source(diag.get("config_source", "")),
+        "config_source": diag.get("config_source", ""),
+        "hostname": masked_h,
+        "host": masked_h,
+        "port": diag.get("port", "N/A"),
+        "database": diag.get("database_name", "N/A"),
+        "database_name": diag.get("database_name", "N/A"),
+        "username": masked_u,
+        "masked_username": masked_u,
+        "pooler_detected": is_pooler,
+        "pooler": pooler_label,
+        "pooler_mode": pooler_label,
+        "direct_supabase_host_detected": is_direct,
+        "database_url_present": diag.get("has_database_url", False),
+        "connection": "READY" if health.is_ready else "ERROR",
+        "connection_status": "READY" if health.is_ready else "ERROR",
+        "status_code": health.status_code,
+        "health_message": health.message,
+    }
+
+
 def parse_database_url(url: Optional[str] = None) -> Tuple[str, str]:
     """Determine the engine type ('sqlite' or 'postgresql') and target path/connection string.
 
@@ -238,7 +307,10 @@ def parse_database_url(url: Optional[str] = None) -> Tuple[str, str]:
     Returns:
         Tuple[str, str]: (engine_type, connection_target)
     """
-    db_url = url or settings.get_database_url()
+    db_url = url if url is not None else settings.get_database_url()
+    if not db_url:
+        return "unknown", ""
+
     if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
         # Normalize postgres:// to postgresql:// for driver compatibility
         if db_url.startswith("postgres://"):
@@ -265,6 +337,10 @@ def parse_database_url(url: Optional[str] = None) -> Tuple[str, str]:
         return "sqlite", target
     elif "://" in db_url:
         return "unknown", db_url
+
+    # If running in cloud mode and no explicit url was passed, never silently fall back to local sqlite
+    if is_cloud_environment() and url is None:
+        return "unknown", ""
 
     return "sqlite", str(settings.database_path)
 
@@ -296,8 +372,13 @@ def get_connection(
 
     engine_type, target = parse_database_url(database_url)
 
-    if engine_type == "unknown":
-        raise ValueError(f"Unsupported database scheme in URL: {sanitize_database_url_for_logging(target)}")
+    if engine_type == "unknown" or not target:
+        if is_cloud_environment():
+            raise ConfigurationError(
+                "Streamlit Cloud deployment requires DATABASE_URL in Secrets. "
+                "Local SQLite fallback is strictly disabled in cloud mode to prevent silent data loss on container restart."
+            )
+        raise ValueError(f"Unsupported or missing database URL: {sanitize_database_url_for_logging(target)}")
 
     if engine_type == "postgresql":
         diag = extract_safe_db_diagnostics(target, engine_type)
@@ -623,23 +704,29 @@ def check_database_health(
     engine_type, target = parse_database_url(url_target)
     diag = extract_safe_db_diagnostics(target, engine_type)
 
-    if engine_type == "unknown":
+    if engine_type == "unknown" or not target:
+        msg = (
+            "Missing DATABASE_URL secret in Streamlit Cloud."
+            if is_cloud_environment()
+            else f"Unsupported or malformed database URL scheme in: {sanitize_database_url_for_logging(target)}"
+        )
+        btype = "postgresql" if is_cloud_environment() else "unknown"
         log_database_diagnostics(
-            backend_type="unknown",
+            backend_type=btype,
             host=diag.get("host"),
             port=diag.get("port"),
             database_name=diag.get("database_name"),
             username=diag.get("username"),
             has_database_url=diag.get("has_database_url", False),
             exc_type="ConfigurationError",
-            exc_message=f"Unsupported or malformed database URL scheme in: {sanitize_database_url_for_logging(target)}",
+            exc_message=msg,
             config_source=diag.get("config_source"),
         )
         return DatabaseHealth(
             is_ready=False,
             status_code="CONFIG_ERROR",
-            message=f"Unsupported or malformed database URL scheme in: {sanitize_database_url_for_logging(target)}",
-            backend_type="unknown",
+            message=msg,
+            backend_type=btype,
             diagnostics=diag,
         )
 

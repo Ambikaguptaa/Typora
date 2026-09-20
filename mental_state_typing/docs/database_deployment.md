@@ -108,26 +108,44 @@ dbname = "postgres"
 > 2. Select **Session** mode.
 > 3. Use port **5432**.
 > 4. Ensure username is `postgres.[your-project-ref]`.
-> 5. Host is `aws-0-[region].pooler.supabase.com`.
+> 5. Host is `aws-<index>-[region].pooler.supabase.com`.
 > 6. Append `?sslmode=require`.
 
-### 3.2 Configuration Resolution Precedence
-The application resolves database configuration using a strict deterministic priority order:
-1. **Streamlit Secrets `st.secrets["DATABASE_URL"]`** (Authoritative in cloud deployments; cannot be overridden by local `.env` or container environment).
-2. **Streamlit Secrets `st.secrets["database_url"]`** (Lowercase variant).
-3. **Streamlit Secrets `st.secrets["connections"]["postgresql"]["url"]`** (Streamlit SQL connection format).
-4. **Streamlit Secrets `st.secrets["postgres"]["url"]` or table** (`st.secrets["postgres"]`).
-5. **Streamlit Secrets `st.secrets["postgresql"]["url"]`**.
-6. **Environment Variable `DATABASE_URL`** (`os.environ["DATABASE_URL"]`, used for Docker/CLI workflows).
-7. **Local SQLite Fallback** (`database/mental_state.db`, active ONLY when no secrets or env vars are present).
+### 3.2 Canonical Streamlit Secret Format (Step 15)
+In the **Streamlit Community Cloud Dashboard** (`App Settings > Secrets`), enter:
+```toml
+# Canonical Cloud Secret Interface
+DATABASE_URL = "postgresql://postgres.[YOUR-PROJECT-REF]:[YOUR-PASSWORD]@aws-0-[YOUR-REGION].pooler.supabase.com:5432/postgres?sslmode=require"
+```
+- No separate host, port, or database configuration is required when `DATABASE_URL` is configured.
+- Real credentials must NEVER be committed to Git or pushed to GitHub (`.gitignore` protects secrets).
 
-### 3.3 Strict No-Silent-Fallback Invariant
+### 3.3 Configuration Resolution Precedence (Deterministic Policy)
+The application resolves database configuration using a strict deterministic priority order:
+1. **Streamlit Cloud Root-Level Secret `st.secrets["DATABASE_URL"]`** (Canonical cloud secret; authoritatively overrides container environment and local `.env`).
+2. **Streamlit Cloud Secret `st.secrets["database_url"]`** (Lowercase variant).
+3. **Streamlit Cloud Secret `st.secrets["connections"]["postgresql"]["url"]`** (Streamlit native SQL connection format).
+4. **Streamlit Cloud Secret `st.secrets["postgres"]["url"]` or table** (`st.secrets["postgres"]`).
+5. **Streamlit Cloud Secret `st.secrets["postgresql"]["url"]`**.
+6. **Process Environment `DATABASE_URL`** (`os.environ["DATABASE_URL"]`, for Docker/CLI workflows).
+7. **Local `.env` `DATABASE_URL`** (For local environment customization).
+8. **Local SQLite Fallback** (`database/mental_state.db`, active ONLY in local development).
+
+### 3.4 Strict No-Silent-Fallback Invariant (Cloud Data Integrity)
 > [!WARNING]
 > **Cloud Deployments Never Silently Fall Back to SQLite.**  
-> If external PostgreSQL fails (e.g. DNS failure, auth error, network timeout), the application will **NEVER** silently switch to SQLite. Silently falling back to SQLite on Streamlit Cloud would give a false appearance of operation while writing user records to an ephemeral filesystem that is wiped on container reboot.
+> If external PostgreSQL fails or `DATABASE_URL` is missing in Streamlit Cloud, the application will **NEVER** silently switch to SQLite. Silently falling back to SQLite on Streamlit Cloud creates ephemeral local storage that is wiped on container reboot, falsely presenting the system as functional while dropping participant records.
 > 
 > Instead, the application:
-> - Traps the database failure at the error boundary to prevent whole-app crashing.
-> - Reports the truthful status in the sidebar: `OFFLINE (DNS_ERROR)`, `OFFLINE (AUTH_ERROR)`, or `OFFLINE (CONNECTION_ERROR)`.
-> - Emits a safe diagnostic block to `stderr` indicating the config source, masked host, masked user, and exact exception reason.
+> - Traps database failure at the error boundary to prevent whole-app crashing.
+> - Reports truthful status in the sidebar: `OFFLINE (CONFIG_ERROR)`, `OFFLINE (DNS_ERROR)`, `OFFLINE (AUTH_ERROR)`, or `OFFLINE (CONNECTION_ERROR)`.
+> - Displays safe masked diagnostics in the **System Status** dashboard and flushes diagnostic summaries to `sys.stderr`.
 > - Preserves local SQLite exclusively for genuine local development workflows.
+
+### 3.5 Database Health Reporting
+Health status is evaluated via `SELECT 1;` with immediate connection cleanup:
+- `DATABASE_READY`: PostgreSQL connection established and query verified.
+- `CONFIG_ERROR`: Missing or malformed `DATABASE_URL` secret.
+- `DNS_ERROR`: Hostname resolution failure (e.g. attempting to resolve direct IPv6 Supabase host).
+- `AUTH_ERROR`: Bad username or password.
+- `CONNECTION_ERROR`: TCP timeout, network unreachable, or SSL negotiation failure.
