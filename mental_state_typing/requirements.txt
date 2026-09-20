@@ -14,9 +14,12 @@ tensorflow>=2.15.0; sys_platform != "win32" or python_version < "3.13"
 # Visualization & Interactive Dashboard
 streamlit>=1.30.0
 plotly>=5.18.0
+matplotlib>=3.8.0
 
 # Configuration & Security Utilities
 python-dotenv>=1.0.0
+cryptography>=42.0.0
 
 # Testing
 pytest>=8.0.0
+

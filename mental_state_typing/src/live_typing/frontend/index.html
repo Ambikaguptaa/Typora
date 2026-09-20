@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Typing Behavioral Capture Bridge</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    body {
+      background-color: transparent;
+      color: #E6EDF3;
+      padding: 8px 4px;
+      overflow: hidden;
+    }
+    .typing-container {
+      background: #15181E;
+      border: 1px solid #28303E;
+      border-radius: 8px;
+      padding: 16px;
+      box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+    .header-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      background: rgba(53, 214, 255, 0.1);
+      color: #35D6FF;
+      border: 1px solid rgba(53, 214, 255, 0.3);
+    }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #35D6FF;
+      box-shadow: 0 0 6px #35D6FF;
+    }
+    .privacy-tag {
+      font-size: 11px;
+      color: #45E0A8;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-weight: 500;
+    }
+    .prompt-box {
+      background: #111318;
+      border: 1px solid #1F242D;
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+      font-size: 13px;
+      line-height: 1.5;
+      color: #9BA3AF;
+      user-select: none;
+    }
+    .prompt-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #8B7CFF;
+      margin-bottom: 4px;
+      font-weight: 600;
+    }
+    .typing-input {
+      width: 100%;
+      height: 110px;
+      background: #1B1F26;
+      border: 1px solid #2C3545;
+      border-radius: 6px;
+      color: #E6EDF3;
+      padding: 12px;
+      font-size: 14px;
+      line-height: 1.6;
+      resize: none;
+      outline: none;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+    .typing-input:focus {
+      border-color: #35D6FF;
+      box-shadow: 0 0 0 1px #35D6FF, 0 0 12px rgba(53, 214, 255, 0.2);
+    }
+    .typing-input:disabled {
+      background: #111318;
+      border-color: #1F242D;
+      color: #555E6D;
+      cursor: not-allowed;
+    }
+    .telemetry-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 10px;
+      font-size: 12px;
+      color: #8B949E;
+    }
+    .count-indicator {
+      font-variant-numeric: tabular-nums;
+      color: #35D6FF;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="typing-container">
+    <div class="header-bar">
+      <div class="status-badge" id="statusBadge">
+        <span class="status-dot"></span>
+        <span id="statusText">Active Capture Stream</span>
+      </div>
+      <div class="privacy-tag">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+        </svg>
+        <span>Zero-Text Privacy Active</span>
+      </div>
+    </div>
+
+    <div class="prompt-box">
+      <div class="prompt-title">Typing Task Prompt</div>
+      <div id="promptContent">The rapid advance of technology requires continuous adaptation and cognitive focus. Clear thinking and steady execution produce reliable results under observation.</div>
+    </div>
+
+    <textarea
+      id="typingArea"
+      class="typing-input"
+      placeholder="Click here and begin typing naturally according to the prompt above..."
+      autocomplete="off"
+      autocorrect="off"
+      autocapitalize="off"
+      spellcheck="false"
+    ></textarea>
+
+    <div class="telemetry-row">
+      <div>Captured Events: <span id="eventCounter" class="count-indicator">0</span></div>
+      <div id="captureHint">Keystrokes are converted strictly into anonymized timing tokens</div>
+    </div>
+  </div>
+
+  <script>
+    // ZERO-RAW-TEXT INVARIANT:
+    // Neither event.key nor textarea.value is ever stored or transmitted.
+    // Events strictly record high-resolution timestamps and categorical tokens.
+
+    let isSessionActive = true;
+    let eventBuffer = [];
+    let totalCaptured = 0;
+    let flushTimer = null;
+
+    const textarea = document.getElementById('typingArea');
+    const counterSpan = document.getElementById('eventCounter');
+    const promptSpan = document.getElementById('promptContent');
+
+    function sendToStreamlit(value) {
+      window.parent.postMessage({
+        type: "streamlit:setComponentValue",
+        value: value
+      }, "*");
+    }
+
+    function setFrameHeight() {
+      const height = document.body.scrollHeight + 10;
+      window.parent.postMessage({
+        type: "streamlit:setFrameHeight",
+        height: height
+      }, "*");
+    }
+
+    function classifyKey(event) {
+      const code = event.code || "";
+      const isBackspace = event.key === "Backspace" || code === "Backspace";
+      const isEnter = event.key === "Enter" || code === "Enter";
+      const isSpace = event.key === " " || code === "Space";
+
+      let token = "k_other";
+      if (isBackspace) {
+        token = "k_backspace";
+      } else if (isEnter) {
+        token = "k_enter";
+      } else if (isSpace) {
+        token = "k_space";
+      } else if (/^[a-zA-Z0-9]$/.test(event.key)) {
+        token = "k_alpha";
+      }
+
+      return {
+        key_token: token,
+        is_backspace: isBackspace,
+        is_enter: isEnter,
+        is_space: isSpace
+      };
+    }
+
+    function queueEvent(eventType, event) {
+      if (!isSessionActive) return;
+
+      const classification = classifyKey(event);
+      const timingRecord = {
+        event_type: eventType,
+        timestamp_ms: performance.now(),
+        key_token: classification.key_token,
+        is_backspace: classification.is_backspace,
+        is_enter: classification.is_enter,
+        is_space: classification.is_space
+      };
+
+      eventBuffer.push(timingRecord);
+      totalCaptured++;
+      counterSpan.textContent = totalCaptured;
+
+      // Throttle/batch flush to parent Streamlit frame
+      if (!flushTimer) {
+        flushTimer = setTimeout(flushEvents, 100);
+      }
+    }
+
+    function flushEvents() {
+      flushTimer = null;
+      if (eventBuffer.length > 0) {
+        const batch = eventBuffer.slice();
+        eventBuffer = [];
+        sendToStreamlit(batch);
+      }
+    }
+
+    // Attach listeners strictly to the dedicated typing textarea
+    textarea.addEventListener('keydown', (e) => {
+      queueEvent('down', e);
+    });
+
+    textarea.addEventListener('keyup', (e) => {
+      queueEvent('up', e);
+    });
+
+    // Handle Streamlit incoming messages
+    window.addEventListener('message', (event) => {
+      if (event.data && event.data.type === "streamlit:render") {
+        const args = event.data.args || {};
+        if (args.session_active !== undefined) {
+          isSessionActive = Boolean(args.session_active);
+          textarea.disabled = !isSessionActive;
+        }
+        if (args.prompt_text) {
+          promptSpan.textContent = args.prompt_text;
+        }
+        if (args.reset_signal) {
+          textarea.value = "";
+          eventBuffer = [];
+          totalCaptured = 0;
+          counterSpan.textContent = "0";
+        }
+        setFrameHeight();
+      }
+    });
+
+    // Initial setup
+    setFrameHeight();
+    window.addEventListener('resize', setFrameHeight);
+  </script>
+</body>
+</html>

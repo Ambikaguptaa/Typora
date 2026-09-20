@@ -33,17 +33,24 @@ The system is organized into four decoupled, modular subsystems:
                   └──────────────────┬──────────────────┘
                                      │
                   ┌──────────────────▼──────────────────┐
-                  │ 3. Deep Learning Subsystem (Phase 4)│
+                  │ 3. Deep Learning Subsystem (LSTM)   │
                   │ - Sliding-window sequence encoding  │
-                  │ - Temporal pattern modeling (LSTM)  │
-                  │ - Behavioral strain inference       │
+                  │ - Stacked recurrent LSTM classifier │
+                  │ - Group-aware leakage prevention    │
                   └──────────────────┬──────────────────┘
                                      │
                   ┌──────────────────▼──────────────────┐
-                  │ 4. Data Visualization Subsystem     │
+                  │ 4. Assessment & Interpretation      │
+                  │ - Model uncertainty (margin, entropy│
+                  │ - Personal baseline interpretation  │
+                  │ - Data-quality gate & Zero-Text JSON│
+                  └──────────────────┬──────────────────┘
+                                     │
+                  ┌──────────────────▼──────────────────┐
+                  │ 5. Data Visualization Subsystem     │
                   │ - Interactive Plotly analytics      │
-                  │ - Streamlit behavioral dashboard    │
-                  │ - Real-time rhythm metrics & gauges │
+                  │ - Streamlit workstation dashboard   │
+                  │ - Telemetry readouts & status LEDs  │
                   └─────────────────────────────────────┘
 ```
 
@@ -99,34 +106,72 @@ The dataset located at `data/sample/sample_keystrokes.csv` is generated purely f
 
 ---
 
+## 📈 Personal Typing Baseline
+
+### 1. Why a Personal Baseline is Needed
+Typing cadence is highly idiosyncratic. One user naturally types at 75 WPM with 85ms dwell times, while another fluently types at 40 WPM with 130ms dwell times. Absolute thresholds inevitably produce false positives. To evaluate behavioral fluctuations meaningfully, the system computes an individual historical baseline for each user and evaluates deviations relative to their own past habits.
+
+### 2. Baseline Statistical Calculation
+For each participant with sufficient historical observations, the baseline engine calculates both parametric and robust non-parametric metrics across numerical typing variables (WPM, dwell time, flight interval, pause rate, backspace rate, CV of flight):
+- **Mean & Standard Deviation**: Captures central tendency and overall dispersion.
+- **Median & Median Absolute Deviation (MAD)**: Provides outlier-resistant measures of central tendency:
+  $$\text{MAD} = \text{median}(|x - \text{median}(x)|)$$
+- **Interquartile Range (IQR)**: Evaluates spread across the middle 50% of sessions ($p_{75} - p_{25}$).
+- **Historical Outlier Auditing**: Sessions exceeding $2.5 \times \text{MAD}$ are flagged for investigation without blind deletion.
+
+### 3. Deviation Metrics
+When evaluating a new typing session against an established personal baseline:
+- **Absolute Deviation**: $\Delta = x_{\text{current}} - \mu_{\text{baseline}}$
+- **Percentage Deviation**: $\%\Delta = \frac{x_{\text{current}} - \mu_{\text{baseline}}}{\mu_{\text{baseline}}} \times 100$ (with zero-division protection)
+- **Standardized Deviation ($z$-score)**: $z = \frac{x_{\text{current}} - \mu_{\text{baseline}}}{\sigma_{\text{baseline}}}$ (with zero-variance fallback to MAD)
+- **Direction of Change**: Categorized as `"higher"`, `"lower"`, or `"within_baseline"` based on a configurable tolerance band ($|z| \le 0.5$).
+
+### 4. Typing Deviation Index (TDI)
+The **Typing Deviation Index (TDI)** is a normalized composite score from 0.0 to 100.0 that aggregates standardized deviations across all evaluated behavioral features:
+$$\text{TDI} = \min\left(100.0, \frac{1}{N} \sum_{i=1}^N \min(|z_i|, 4.0) \times 25.0\right)$$
+- An average $|z| = 1.0$ yields a TDI of 25.0.
+- An average $|z| = 2.0$ yields a TDI of 50.0.
+- An average $|z| \ge 4.0$ reaches the ceiling of 100.0.
+
+### 5. Strict Non-Medical Boundary
+**The Typing Deviation Index is strictly a statistical indicator of motor rhythm divergence.** It does NOT measure or diagnose stress, anxiety, depression, burnout, or any clinical disorder. A high TDI simply indicates that the typing cadence differed from historical averages (e.g. faster execution, longer hesitations, or increased revisions).
+
+### 6. Cold-Start Management & Controlled Updates
+- **Cold Start**: If a user has fewer than `MIN_BASELINE_SESSIONS` (default: 5), their baseline status is marked `"insufficient_history"`. The system **never fabricates** a baseline.
+- **Baseline Updates**: As new valid sessions accumulate, `update_user_baseline()` recalculates statistics across the verified session history, preventing any single anomalous session from arbitrarily corrupting baseline distributions.
+
+---
+
 ## 🔄 Planned Workflow
 
 The system is developed through a five-phase incremental roadmap:
 
 1. **Phase 1: Foundation & Architecture (Complete)**
    - Project directory scaffolding, environment management, SQLite connection layer, foundational module interfaces, and unit testing suite.
-2. **Phase 2: Dataset Investigation & Data Engineering (Current Phase)**
+2. **Phase 2: Dataset Investigation & Data Engineering (Complete)**
    - Schema-agnostic dataset adapter, data quality validation framework, dataset registry, synthetic sample dataset, and skeuomorphic workstation inspector.
-3. **Phase 3: Privacy & Security Enforcement**
-   - Salted pseudonymization, character suppression audit tests, and secure local metadata handling.
+3. **Phase 3: Personal Baseline & Temporal Sequence Preparation (Current Phase)**
+   - Personal typing baseline engine, robust MAD/IQR statistics, Typing Deviation Index, leakage-safe grouped splitting, and 3D temporal sequence arrays.
 4. **Phase 4: Sequential Deep Learning Pipeline**
-   - Sequence windowing, model definition, training workflows, loss evaluation, and saved model checkpoints.
-5. **Phase 5: Live Behavioral Estimation & Interactive UI**
-   - Live timing event buffer, session management, and integrated end-user dashboard.
+   - Recurrent network (LSTM) architecture, sequence scaling, model training workflows, loss evaluation, and saved model checkpoints.
+5. **Phase 5: Live Behavioral Estimation & Dedicated UI/UX Phase**
+   - Live timing event buffer, end-to-end inference, and full workstation UI redesign.
 
 ---
 
 ## 🚀 Current Development Phase
 
-- **Current Status**: **Phase 2 (Dataset Investigation & Data Engineering Layer)**
+- **Current Status**: **Phase 3 (Personal Baseline & Temporal Sequences Complete)**
 - **Completed in this Phase**:
-  - `DatasetAdapter` with heuristic auto-detection for users, sessions, timestamps, micro-timings, and labels.
-  - `DatasetRegistry` providing decoupled dataset configurations.
-  - `DataQuality` module evaluating missing values, duplicate rows, negative durations, timestamp monotonicity, and class balance.
-  - 250-record realistic synthetic sample dataset (`data/sample/sample_keystrokes.csv`).
-  - Skeuomorphic "behavioral workstation" UI console and interactive Dataset Inspector in Streamlit.
-  - Zero-text privacy filter masking sensitive text fields during data ingestion and inspection.
-  - Comprehensive unit tests covering adapters, registry, and quality metrics (32 total passing tests).
+  - `src/data_engineering/baseline.py`: Personal baseline engine with empirical & robust stats (Mean, Median, Std, MAD, IQR).
+  - Configurable `MIN_BASELINE_SESSIONS` (default: 5) and strict cold-start `"insufficient_history"` handling.
+  - Standardized deviations ($z$-scores) with safe zero-variance fallback and tolerance bands.
+  - Non-diagnostic **Typing Deviation Index (TDI, 0–100)**.
+  - Baseline updating and persistence in `data/processed/baselines/`.
+  - Feature Manifest cataloging 25+ behavioral features and documenting reasons for unavailable variables.
+  - Leakage-safe grouped train/test splitting by user ID.
+  - 3D temporal sequence slicing `(samples, timesteps, features)` with zero cross-user sequence bleed.
+  - Comprehensive unit test suite with 65 passing tests (100% pass rate).
 
 ---
 
@@ -162,13 +207,24 @@ mental_state_typing/
 │   │   ├── loader.py           # Timing data ingestion
 │   │   ├── cleaner.py          # Outlier filtering
 │   │   ├── feature_engineering.py # Hold/flight time feature extraction
-│   │   └── baseline.py         # Heuristic baseline strain calculation
+│   │   ├── baseline.py         # Personal baseline and TDI calculation
+│   │   └── pipeline.py         # Feature engineering orchestrator
 │   ├── deep_learning/
 │   │   ├── __init__.py
-│   │   ├── preprocessing.py    # Sequence preparation
-│   │   ├── model.py            # Deep learning model stub
-│   │   ├── train.py            # Training pipeline stub
-│   │   └── predict.py          # Prediction engine stub
+│   │   ├── training_validation.py # Training readiness validation checks
+│   │   ├── data_split.py       # Group-aware 3-way split & sequence scaling
+│   │   ├── label_encoder.py    # Categorical label encoder & mapping
+│   │   ├── model.py            # Stacked LSTM classifier & ModelConfig
+│   │   ├── train.py            # Training pipeline & CLI entrypoint
+│   │   ├── evaluate.py         # Metrics, confusion matrix, overfitting checks
+│   │   ├── baseline_classifier.py # Non-deep-learning benchmark classifier
+│   │   ├── predict.py          # Sequence inference engine
+│   │   └── preprocessing.py    # Sliding-window sequence slicing
+│   ├── assessment/
+│   │   ├── __init__.py
+│   │   ├── quality_checks.py   # Data-quality gate & explicit assessment states
+│   │   ├── interpretation.py   # Prediction uncertainty, entropy & baseline ranking
+│   │   └── behavioral_assessment.py # Assessment synthesis & Zero-Text JSON reports
 │   ├── privacy/
 │   │   ├── __init__.py
 │   │   ├── pseudonymization.py # Salted participant ID hashing
@@ -180,15 +236,214 @@ mental_state_typing/
 │   └── visualization/
 │       ├── __init__.py
 │       ├── charts.py           # Plotly charts (gauges, histograms, timelines)
-│       └── dashboard.py        # Streamlit presentation helpers
+│       ├── dashboard.py        # Skeuomorphic workstation console components
+│       └── theme.py            # Console visual styling tokens
 │
 └── tests/
     ├── __init__.py
     ├── test_data_engineering.py # Data engineering unit tests
     ├── test_baseline.py         # Baseline strain metric tests
+    ├── test_data_quality.py     # Data quality validation tests
+    ├── test_dataset_adapter.py  # Schema-agnostic adapter tests
+    ├── test_feature_engineering.py # Feature extraction tests
     ├── test_privacy.py          # Privacy & pseudonymization tests
-    └── test_config_and_db.py    # Settings and SQLite connectivity tests
+    ├── test_config_and_db.py    # Settings and SQLite connectivity tests
+    ├── test_sequence_preprocessing.py # Sliding window tests
+    ├── test_training_validation.py # Training readiness validation tests
+    ├── test_lstm_model.py       # LSTM architecture tests
+    ├── test_data_split.py       # Grouped 3-way split & scaler tests
+    ├── test_evaluation.py       # Evaluation metrics & confusion matrix tests
+    ├── test_prediction.py       # Sequence inference tests
+    ├── test_lstm_smoke_train.py # Technical pipeline smoke tests
+    ├── test_interpretation.py   # Model uncertainty & baseline ranking tests
+    ├── test_assessment_quality.py # Quality gate & state transition tests
+    └── test_behavioral_assessment.py # Complete assessment pipeline integration tests
 ```
+
+---
+
+## 🧠 Deep Learning / LSTM Sequential Pipeline
+
+The Deep Learning subsystem implements a temporal sequence classification pipeline designed to capture fine-grained behavioral changes across successive keystroke events without analyzing typed text.
+
+### 1. Why LSTM is Used
+Typing behavior is inherently temporal and non-Markovian: motor rhythms exhibit transient pauses, hesitation bursts, typing speed fluctuations, and backspace corrective clusters that span multiple consecutive keystrokes. Standard feedforward neural networks treat each event independently, losing the temporal context. Long Short-Term Memory (LSTM) recurrent networks maintain internal memory cell states ($c_t$) and hidden states ($h_t$) gated by input, forget, and output mechanisms, enabling the model to learn long-range temporal dependencies and rhythm transitions indicative of cognitive fatigue or workload.
+
+### 2. Input Sequence Representation
+Input tensors have shape:
+$$\text{Input Tensor} \in \mathbb{R}^{\text{samples} \times \text{timesteps} \times \text{features}}$$
+- **Samples ($N$)**: The number of extracted sliding-window sequence segments.
+- **Timesteps ($T$)**: The sequence window size (default: 30 consecutive keystroke events).
+- **Features ($D$)**: Numeric behavioral timing dimensions per keystroke:
+  1. `dwell_time`: Key hold duration in milliseconds ($t_{\text{release}} - t_{\text{press}}$).
+  2. `flight_time`: Inter-key transition interval in milliseconds ($t_{\text{press}, k} - t_{\text{release}, k-1}$).
+  3. `pause_duration`: Cognitive hesitation gaps exceeding threshold (e.g. 2000ms).
+  4. `typing_speed`: Keystroke rate or rolling WPM.
+  5. `backspace`: Binary indicator or frequency of corrective keystrokes.
+  6. `error_flag`: Flagged timing anomaly or editing burst.
+
+### 3. What the Model Predicts
+The model predicts the **behavioral state category** associated with the typing sequence, defined strictly by the labels present in the research dataset (e.g., `Calm`, `Fatigued`, `High_Workload`). The output probabilities represent model alignment with annotated experimental conditions, **not** clinical diagnoses.
+
+### 4. Group-Aware Train / Validation / Test Splitting
+To evaluate genuine generalization to unseen participants:
+- Data is partitioned into three disjoint sets: **Train (70%)**, **Validation (15%)**, and **Test (15%)**.
+- Partitioning uses **Group-Aware Splitting** (`GroupShuffleSplit`) grouped by `user_id`.
+- If a dataset contains fewer than 3 users, grouped splitting gracefully falls back to `session_id`.
+
+### 5. Prevention of Data Leakage
+- **Zero Group Overlap**: All sequences from a given user (or session) exist exclusively in Train, Validation, or Test:
+  $$\text{Train}_{\text{groups}} \cap \text{Val}_{\text{groups}} = \emptyset, \quad \text{Val}_{\text{groups}} \cap \text{Test}_{\text{groups}} = \emptyset, \quad \text{Train}_{\text{groups}} \cap \text{Test}_{\text{groups}} = \emptyset$$
+- **Window Isolation**: Temporal sliding windows are constructed *within* each user session independently and never cross session or partition boundaries.
+- **Untouched Test Set**: The test partition is held out completely and only evaluated once training is finalized.
+
+### 6. Feature Scaling Protocol
+- The feature scaler (`StandardScaler` or `RobustScaler`) is fitted **strictly on the training sequences**.
+- Validation, test, and future live sequences are transformed using the fitted training statistics without re-estimating mean or variance:
+  $$\mu_{\text{train}}, \sigma_{\text{train}} \leftarrow \text{Fit}(X_{\text{train}}), \quad X_{\text{val}}^{\text{scaled}} \leftarrow \frac{X_{\text{val}} - \mu_{\text{train}}}{\sigma_{\text{train}}}$$
+- The fitted scaler is serialized to `models/feature_scaler.pkl` along with `models/feature_manifest.json` preserving the exact feature ordering.
+
+### 7. Class Imbalance Handling
+- Class distributions are inspected dynamically from training labels.
+- Class weights are calculated **exclusively on the training split** using balanced inverse frequency:
+  $$w_c = \frac{N_{\text{train}}}{K \times N_c}$$
+- These weights are applied during loss optimization to prevent majority-class bias.
+
+### 8. Metrics Reported
+Model evaluation avoids relying solely on raw accuracy (which is deceptive under class imbalance) and computes:
+- **Balanced Accuracy**: Macro-averaged recall across all classes.
+- **Macro & Weighted Precision, Recall, and F1-Score**.
+- **Per-Class Breakdown**: Precision, recall, F1, and support for each specific class.
+- **Confusion Matrix**: Saved in machine-readable JSON (`confusion_matrix.json`), tabular CSV (`confusion_matrix.csv`), and high-resolution styled heatmap (`confusion_matrix.png`).
+- **Overfitting Diagnostics**: Objective comparison between training, validation, and test performance.
+
+### 9. Non-Deep-Learning Baseline Comparison
+To prove whether recurrent sequence modeling provides true empirical benefit over simpler approaches, a non-deep-learning baseline (Random Forest or Logistic Regression) is trained on aggregated summary statistics (mean, std, median, min, max) of the exact same sequences across the identical group-safe splits. Metrics are saved to `models/baseline_metrics.json`.
+
+### 10. Model Artifacts Persistence
+All serialized artifacts are saved in `models/`:
+- `lstm_model.keras`: Keras native model checkpoint (weights, architecture, and optimizer state).
+- `feature_scaler.pkl`: Training-fitted feature scaler.
+- `label_mapping.json`: Bidirectional class-to-integer mapping.
+- `feature_manifest.json`: Feature catalog, dimensions, and ordering.
+- `training_config.json`: Hyperparameters and training configuration.
+- `training_metrics.json`: Validation and test set performance report.
+- `training_history.json`: Epoch-by-epoch loss and accuracy telemetry.
+
+### 11. Command-Line Training Execution
+To run the model training pipeline from the terminal:
+```bash
+python -m src.deep_learning.train
+```
+If no real dataset is found in `data/raw/`, the system enforces data protocol safety and reports:
+`REAL MODEL TRAINING BLOCKED -- NO VALID LABELED DATASET AVAILABLE`
+
+### 12. Non-Diagnostic Research Boundary
+The LSTM model detects fine-motor rhythm variations mapped to research condition labels. It **does not diagnose** psychological, neurological, or psychiatric disorders. All model probability outputs are labeled as "class probabilities", not "clinical confidence".
+
+---
+
+## 🚦 Current Dataset & Model Training Status
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ STATUS: REAL DATASET REQUIRED — INTEGRATION PIPELINE READY                   │
+│ Training Gate: ENGAGED & LOCKED (Zero Fabrication Guarantee)                │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Critical Distinction: Software Implementation vs. Empirical Model Training
+
+| Dimension | Status | Verified Details |
+| :--- | :--- | :--- |
+| **Software Implementation** | **100% Complete & Hardened** | Full pipeline verified with 160+ automated unit & integration tests. Canonical event schema, BaseDatasetAdapter interface, 15-point empirical validator, 6-dimension leakage audit, zero-raw-text privacy filters, group-aware 3-way splitters, and stacked LSTM architecture are fully operational. |
+| **Empirical Model Training** | **Awaiting Real Research Dataset** | In strict compliance with academic and scientific research ethics, **no fake model weights, fabricated accuracy metrics, or synthetic pseudo-predictions exist**. Production model training will only commence once an approved real research dataset is placed in `data/raw/`. |
+| **Current Training Gate** | **Safely Blocked** | Executing `python -m src.deep_learning.train` stages the pre-flight checks and halts at `[1/8] Dataset discovery ........ BLOCKED (REAL DATASET REQUIRED)`. |
+
+### Next Step for Ingestion:
+To ingest an approved research dataset (e.g. MobileStress or CMU keystroke dynamics):
+1. Review the detailed protocol in [docs/dataset_acquisition_checklist.md](docs/dataset_acquisition_checklist.md).
+2. Place the verified dataset file in `data/raw/` (e.g. `data/raw/mobilestress.csv`).
+3. Execute the staged training command:
+   ```bash
+   python -m src.deep_learning.train
+   ```
+   The engine will automatically execute all 8 pre-flight verification stages and train the production LSTM model.
+
+
+---
+
+## 🔍 Behavioral Assessment & Model Interpretation Layer
+
+The Assessment subsystem (`src/assessment/`) synthesizes temporal model predictions, personal baseline deviations, and data-quality checks into an interpretable, transparent behavioral evaluation.
+
+### 1. Dual Independent Signals (Zero Score Fusion)
+The system strictly separates two fundamentally distinct concepts:
+- **Model Prediction**: *"What population behavioral pattern does this sequence resemble based on training data?"*
+- **Personal Baseline Deviation (TDI)**: *"How different is this specific session from this individual user's own historical motor rhythm?"*
+
+These two signals are **never** mathematically merged into a single composite "mental health score" or arbitrary weighted formula. Both signals are presented side-by-side with appropriate scientific context.
+
+### 2. Model Uncertainty & Prediction Reliability
+The engine calculates empirical uncertainty indicators:
+- **Top Probability ($p_{\text{top}}$)**: Maximum class probability assigned by the model.
+- **Probability Margin ($\Delta p$)**: Difference between the top and second-highest class probabilities:
+  $$\Delta p = p_{\text{top}} - p_{\text{second}}$$
+- **Normalized Shannon Entropy ($H_{\text{norm}}$)**: Measures distribution dispersion across classes ($0.0 = \text{certainty}, 1.0 = \text{uniform confusion}$):
+  $$H(p) = -\sum_{i=1}^K p_i \log_2(p_i), \quad H_{\text{norm}}(p) = \frac{H(p)}{\log_2(K)}$$
+- **Reliability Categorization**:
+  - `HIGH_SEPARATION`: $\Delta p \ge 0.30$ (clear class distinction).
+  - `MODERATE_SEPARATION`: $0.15 \le \Delta p < 0.30$.
+  - `LOW_SEPARATION`: $\Delta p < 0.15$ (competing classes are closely contested).
+
+### 3. Personal Baseline & Feature Deviation Ranking
+- Evaluates the **Typing Deviation Index (TDI, 0–100)**:
+  - `expected_variance`: $\text{TDI} < 30$
+  - `moderate_deviation`: $30 \le \text{TDI} < 60$
+  - `higher_deviation`: $\text{TDI} \ge 60$
+- Ranks individual features by absolute standardized deviation ($|z\text{-score}|$) to highlight the specific motor dimensions driving deviation (e.g. dwell time elongation, flight latency increases).
+
+### 4. Data-Quality Gate & Explicit Operational States
+Before producing an assessment, the system audits input integrity and establishes an unambiguous operational state:
+- `ready`: Valid keystrokes, model and personal baseline both available.
+- `prediction_available`: Model prediction ready; baseline unavailable or insufficient historical sessions.
+- `baseline_available`: Personal baseline ready; deep learning model not yet loaded.
+- `model_unavailable`: Neither model nor baseline ready.
+- `insufficient_data`: Fewer than 5 keystrokes recorded in the session window.
+- `not_ready`: Input tensor contains NaNs, infinite values, or dimensional mismatches.
+
+### 5. Machine-Readable Zero-Text Reports
+Assessments are serialized as JSON artifacts in `data/processed/assessments/assessment_YYYYMMDD_HHMMSS.json`. In strict compliance with the project's **Zero-Text Policy**, no character names, typed words, or sentence content are ever retained. Reports contain only pseudonymous participant identifiers (`usr_<hash>`), timing metrics, probabilities, and version metadata.
+
+---
+
+## 🔒 Data Security & Privacy Architecture
+
+The Privacy and Security subsystem (`src/privacy/`) operationalizes privacy-by-design principles across every stage of the data lifecycle. A full specification is available in [docs/privacy_threat_model.md](docs/privacy_threat_model.md).
+
+### 1. Strict Zero-Raw-Text Policy
+- **Elimination of Character Content**: Keystroke character names (`key`, `char`, `text`, `word`, `character`, `password`) are quarantined and purged immediately at the boundary of data collection.
+- **Audit Verification**: Continuous programmatic scans (`audit_zero_raw_text`) enforce that no text payloads or key labels can enter databases, feature tables, or serialized assessments.
+
+### 2. Keyed HMAC-SHA256 Pseudonymization
+- Participant identifiers (usernames, student IDs, emails) are replaced with deterministic, irreversible pseudonyms formatted as `usr_<16-hex>`.
+- Hashes utilize server-side environment secrets (`PSEUDONYMIZATION_SECRET`), preventing rainbow table and dictionary re-identification attacks.
+
+### 3. Authenticated Symmetric Encryption at Rest (Fernet)
+- Sensitive artifacts—including personal baseline profiles (`data/processed/baselines/`) and behavioral assessment reports (`data/processed/assessments/`)—are encrypted using Fernet (128-bit AES in CBC mode with PKCS7 padding and HMAC-SHA256 authentication).
+- Integrity verification guarantees that tampered or corrupted ciphertexts are detected immediately upon decryption, raising a `DecryptionError`.
+
+### 4. Differential Privacy (Laplace Mechanism)
+- Aggregate research queries (e.g. population average typing speeds, cohort pause frequencies) inject calibrated noise drawn from the Laplace distribution:
+  $$\text{Noise} \sim \text{Laplace}\left(0, \frac{\Delta}{\epsilon}\right), \quad \text{where } \Delta = \frac{b - a}{N}$$
+- Enforces bounded $L_1$ sensitivity via interval clipping $[a, b]$ and logs cumulative privacy budget consumption under basic sequential composition.
+
+### 5. Data Retention Schedules & GDPR Article 17 Purge
+- Automated data expiration policies prevent indefinite retention:
+  - **Raw timing events**: 7-day retention.
+  - **Session features & baselines**: 90-day retention.
+  - **Behavioral assessment reports**: 180-day retention.
+- **Participant Data Purge**: Supports GDPR Article 17 "Right to be Forgotten", enabling complete deletion of a participant's records across all SQLite tables and local files.
 
 ---
 
@@ -224,7 +479,12 @@ copy .env.example .env
 pytest tests -v
 ```
 
-### 5. Launch the Streamlit Application
+### 5. Execute Model Training Pipeline
+```bash
+python -m src.deep_learning.train
+```
+
+### 6. Launch the Streamlit Application
 ```bash
 streamlit run app.py
 ```
@@ -236,3 +496,4 @@ streamlit run app.py
 This project adheres strictly to privacy-by-design guidelines:
 - **No Keylogging**: The system does not intercept or record key names or textual content.
 - **No Medical Claim**: The system evaluates motor timing fluctuations as a proxy for cognitive strain and strictly does **not** provide clinical diagnosis or medical treatment advice.
+

@@ -31,10 +31,16 @@ class Settings:
     processed_data_path: Path = Path(
         os.getenv("PROCESSED_DATA_PATH", BASE_DIR / "data" / "processed")
     )
+    baselines_path: Path = Path(
+        os.getenv("BASELINES_PATH", BASE_DIR / "data" / "processed" / "baselines")
+    )
     sample_data_path: Path = Path(
         os.getenv("SAMPLE_DATA_PATH", BASE_DIR / "data" / "sample")
     )
     models_path: Path = Path(os.getenv("MODELS_PATH", BASE_DIR / "models"))
+    assessments_path: Path = Path(
+        os.getenv("ASSESSMENTS_PATH", BASE_DIR / "data" / "processed" / "assessments")
+    )
 
     # Database configuration
     database_path: Path = Path(
@@ -45,6 +51,28 @@ class Settings:
     pseudonymization_salt: str = os.getenv(
         "PSEUDONYMIZATION_SALT", "academic_research_salt_default"
     )
+    pseudonymization_secret: str = os.getenv(
+        "PSEUDONYMIZATION_SECRET",
+        os.getenv("PSEUDONYMIZATION_SALT", "academic_research_salt_default"),
+    )
+
+    # Cryptographic Storage Key (Fernet 32-byte base64 key)
+    encryption_key: str = os.getenv("ENCRYPTION_KEY", "")
+
+    # Differential Privacy Configuration
+    dp_enabled: bool = os.getenv("DP_ENABLED", "True").lower() in ("true", "1", "yes")
+    dp_epsilon: float = float(os.getenv("DP_EPSILON", "1.0"))
+
+    # Data Retention Schedules (in days)
+    raw_event_retention_days: int = int(os.getenv("RAW_EVENT_RETENTION_DAYS", "7"))
+    session_retention_days: int = int(os.getenv("SESSION_RETENTION_DAYS", "90"))
+    assessment_retention_days: int = int(
+        os.getenv("ASSESSMENT_RETENTION_DAYS", "180")
+    )
+
+    # Personal Baseline Settings
+    min_baseline_sessions: int = int(os.getenv("MIN_BASELINE_SESSIONS", "5"))
+    baseline_tolerance: float = float(os.getenv("BASELINE_TOLERANCE", "0.5"))
 
     # Academic Project Disclaimer
     system_disclaimer: str = (
@@ -56,8 +84,10 @@ class Settings:
         for path in [
             self.raw_data_path,
             self.processed_data_path,
+            self.baselines_path,
             self.sample_data_path,
             self.models_path,
+            self.assessments_path,
             self.database_path.parent,
         ]:
             path.mkdir(parents=True, exist_ok=True)
