@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from database.database import (
+    DatabaseHealth,
     check_connection,
     check_database_health,
     get_database_config_diagnostics,
@@ -118,15 +119,38 @@ def get_engine() -> BehavioralEngine:
     return st.session_state.engine
 
 
+@st.cache_resource(show_spinner=False)
+def ensure_database_initialized() -> bool:
+    """Initialize database schema once per application process lifetime."""
+    try:
+        return init_db()
+    except Exception as e:
+        logger.error(f"Handled database initialization error: {e}")
+        return False
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_cached_database_health() -> DatabaseHealth:
+    """Evaluate database health with 60s TTL cache to avoid connection storm on reruns."""
+    return check_database_health()
+
+
 def render_sidebar(engine: BehavioralEngine) -> str:
     """Render the primary workstation control sidebar and navigation."""
     with st.sidebar:
-        render_system_masthead(version="v0.3.0", build_label="BEHAVIORAL WORKSTATION")
-        render_section_divider(label="PRIMARY NAVIGATION")
+        st.markdown(
+            """
+            <div class="sidebar-header">
+                <div class="system-title">MENTAL-STATE MONITOR</div>
+                <div class="system-sub">High-Resolution Keystroke Biometrics Console</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         nav_options = [
-            "1. 📋 Overview",
-            "2. ⌨️ Live Session",
-            "3. 📊 Baseline Analytics",
+            "1. ⏱️ Live Assessment",
+            "2. 🔬 Session Analytics",
+            "3. 👤 Personal Baseline",
             "4. 🧠 Behavioral Model",
             "5. 📜 Session History",
             "6. 📑 Reports",
@@ -143,17 +167,13 @@ def render_sidebar(engine: BehavioralEngine) -> str:
         st.markdown("<hr style='border: none; border-top: 1px solid #242B36; margin: 14px 0;'>", unsafe_allow_html=True)
 
         settings.ensure_directories()
-        try:
-            init_db()
-        except Exception as e:
-            logger.error(f"Handled database initialization error: {e}")
-
-        health = check_database_health()
+        ensure_database_initialized()
+        health = get_cached_database_health()
         db_alive = bool(health)
         db_led = "ready" if db_alive else "critical"
         db_status = "ONLINE" if db_alive else f"OFFLINE ({health.status_code})"
         is_cloud_pg = settings.get_database_backend() == "postgresql"
-        db_backend_label = "PostgreSQL (Cloud)" if is_cloud_pg else "SQLite (Local)"
+        db_backend_label = "PostgreSQL (Cloud - pg8000)" if is_cloud_pg else "SQLite (Local)"
 
         # Truthful system overview from backend status aggregator
         sys_status = get_system_overview_status(engine)
@@ -1239,7 +1259,7 @@ def render_dataset_system_status_page() -> None:
                     {db_diag['backend']}
                 </div>
                 <div style="font-size: 0.8rem; color: #9BA3AF;">
-                    Port: {db_diag['port']}
+                    Driver: {db_diag.get('driver', 'sqlite3')} | Port: {db_diag['port']}
                 </div>
             </div>
             """,

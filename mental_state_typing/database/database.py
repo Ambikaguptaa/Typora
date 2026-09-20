@@ -19,7 +19,7 @@ import re
 import sqlite3
 import sys
 from typing import Any, Dict, Generator, List, Optional, Tuple, Union
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from src.config.settings import is_cloud_environment, settings, to_canonical_source
 from src.live_typing.privacy_filter import (
@@ -195,6 +195,8 @@ def log_database_diagnostics(
     config_source: Optional[str] = None,
     is_pooler: Optional[bool] = None,
     is_direct_supabase: Optional[bool] = None,
+    driver: Optional[str] = None,
+    conn_result: Optional[str] = None,
 ) -> None:
     """Print and log safe database connection diagnostics with no passwords exposed."""
     src = config_source or settings.get_database_source()
@@ -208,6 +210,8 @@ def log_database_diagnostics(
         if is_direct_supabase is not None
         else (str(raw_host).endswith(".supabase.co") and not pooler_flag)
     )
+    driver_str = driver or ("pg8000 1.31.5" if backend_type == "postgresql" else "sqlite3")
+    connection_verdict = conn_result or ("FAILED" if exc_type else "SUCCESS")
 
     msg_lines = [
         "=== DATABASE CONNECTION DIAGNOSTIC ===",
@@ -217,6 +221,8 @@ def log_database_diagnostics(
         f"DB PORT: {port or 'N/A'}",
         f"DB USER: {masked_u}",
         f"DB NAME: {database_name or 'N/A'}",
+        f"DRIVER: {driver_str}",
+        f"DATABASE CONNECTION: {connection_verdict}",
         f"POOLER DETECTED: {pooler_flag}",
         f"DIRECT SUPABASE HOST DETECTED: {direct_flag}",
         f"DATABASE_URL Exists: {has_database_url}",
@@ -225,6 +231,7 @@ def log_database_diagnostics(
         f"Port: {port or 'N/A'}",
         f"Database Name: {database_name or 'N/A'}",
         f"Username: {raw_user}",
+        f"Database Exception Type: {exc_type or 'None'}",
         f"psycopg2 Exception Type: {exc_type or 'None'}",
         f"psycopg2 Exception Message: {exc_message or 'None'}",
         "======================================",
@@ -277,6 +284,7 @@ def get_database_config_diagnostics(
     return {
         "backend": engine_type.upper(),
         "backend_type": engine_type,
+        "driver": "pg8000 (pure-python)" if engine_type == "postgresql" else "sqlite3",
         "configuration_source": to_canonical_source(diag.get("config_source", "")),
         "config_source": diag.get("config_source", ""),
         "hostname": masked_h,
@@ -359,7 +367,7 @@ def get_connection(
         database_url: Optional explicit DATABASE_URL connection string.
 
     Returns:
-        Database connection object (sqlite3.Connection or psycopg2.connection).
+        Database connection object (sqlite3.Connection or pg8000.dbapi.Connection).
     """
     if db_path is not None:
         target = str(db_path)
@@ -395,37 +403,44 @@ def get_connection(
             print(warning_msg, file=sys.stderr, flush=True)
 
         try:
-            import psycopg2
-            import psycopg2.extras
+            import pg8000.dbapi
         except ImportError:
-            try:
-                import psycopg
+            log_database_diagnostics(
+                backend_type="postgresql",
+                host=diag["host"],
+                port=diag["port"],
+                database_name=diag["database_name"],
+                username=diag["username"],
+                has_database_url=diag["has_database_url"],
+                exc_type="ImportError",
+                exc_message="pg8000 driver is not installed.",
+                driver="pg8000",
+                conn_result="FAILED",
+            )
+            raise ImportError(
+                "PostgreSQL driver (pg8000) is required for PostgreSQL backend. "
+                "Install pg8000 or configure a local SQLite database."
+            )
 
-                conn = psycopg.connect(target)
-                log_database_diagnostics(
-                    backend_type="postgresql",
-                    host=diag["host"],
-                    port=diag["port"],
-                    database_name=diag["database_name"],
-                    username=diag["username"],
-                    has_database_url=diag["has_database_url"],
-                )
-                return conn
-            except ImportError:
-                log_database_diagnostics(
-                    backend_type="postgresql",
-                    host=diag["host"],
-                    port=diag["port"],
-                    database_name=diag["database_name"],
-                    username=diag["username"],
-                    has_database_url=diag["has_database_url"],
-                    exc_type="ImportError",
-                    exc_message="psycopg2 and psycopg drivers are not installed.",
-                )
-                raise ImportError(
-                    "PostgreSQL driver (psycopg2 or psycopg) is required for PostgreSQL backend. "
-                    "Install psycopg2-binary or configure a local SQLite database."
-                )
+        # Parse target connection parameters safely
+        parsed = urlparse(target)
+        db_user = unquote(parsed.username) if parsed.username else None
+        db_password = unquote(parsed.password) if parsed.password else None
+        db_host = parsed.hostname or "localhost"
+        db_port = parsed.port or 5432
+        db_name = parsed.path.lstrip("/") if parsed.path else "postgres"
+
+        # Query parameters (sslmode, connect_timeout)
+        query_params = parse_qs(parsed.query) if parsed.query else {}
+        ssl_mode = query_params.get("sslmode", ["require"])[0]
+        ssl_context = False if ssl_mode == "disable" else True
+
+        timeout = 10
+        if "connect_timeout" in query_params:
+            try:
+                timeout = int(query_params["connect_timeout"][0])
+            except (ValueError, TypeError):
+                timeout = 10
 
         # Log safe diagnostics prior to connection attempt so configuration is immediately visible in Streamlit logs
         log_database_diagnostics(
@@ -440,23 +455,28 @@ def get_connection(
             config_source=diag.get("config_source"),
             is_pooler=diag.get("is_pooler"),
             is_direct_supabase=diag.get("is_direct_supabase"),
+            driver="pg8000",
         )
 
         try:
-            conn = psycopg2.connect(
-                target,
-                connect_timeout=10,
-                cursor_factory=psycopg2.extras.DictCursor,
+            conn = pg8000.dbapi.connect(
+                user=db_user,
+                password=db_password,
+                host=db_host,
+                port=db_port,
+                database=db_name,
+                ssl_context=ssl_context,
+                timeout=timeout,
             )
-            conn.autocommit = False
-            logger.info("[DATABASE SUCCESS] PostgreSQL connection established successfully.")
+            if hasattr(conn, "autocommit"):
+                conn.autocommit = False
+            logger.info("[DATABASE SUCCESS] PostgreSQL connection established successfully via pg8000.")
             return conn
         except Exception as pg_err:
             exc_type = type(pg_err).__name__
             raw_msg = str(pg_err).strip()
             exc_msg = sanitize_database_url_for_logging(raw_msg)
             try:
-                parsed = urlparse(target)
                 if parsed.password and parsed.password in exc_msg:
                     exc_msg = exc_msg.replace(parsed.password, "********")
             except Exception:
@@ -474,6 +494,8 @@ def get_connection(
                 config_source=diag.get("config_source"),
                 is_pooler=diag.get("is_pooler"),
                 is_direct_supabase=diag.get("is_direct_supabase"),
+                driver="pg8000",
+                conn_result="FAILED",
             )
             if host.endswith(".supabase.co") and not host.startswith("aws-0-") and "pooler" not in host:
                 pooler_advice = (
@@ -499,8 +521,23 @@ def get_connection(
         return conn
 
 
+class RowDict(dict):
+    """Row object that supports both dictionary key access (row['col']), integer index access (row[0]), and dict(row)."""
+
+    def __init__(self, cols: List[str], vals: Union[tuple, list]):
+        super().__init__(zip(cols, vals))
+        self._vals = list(vals)
+
+    def __getitem__(self, item: Any) -> Any:
+        if isinstance(item, int):
+            return self._vals[item]
+        return super().__getitem__(item)
+
+
 class DialectCursorWrapper:
-    """Cursor wrapper providing unified parameter translation across SQLite ('?') and PostgreSQL ('%s')."""
+    """Cursor wrapper providing unified parameter translation across SQLite ('?') and PostgreSQL ('%s')
+    as well as dictionary/index access for query result rows.
+    """
 
     def __init__(self, raw_cursor: Any, is_postgres: bool = False):
         self._cursor = raw_cursor
@@ -514,14 +551,35 @@ class DialectCursorWrapper:
             return self._cursor.execute(query, params)
         return self._cursor.execute(query)
 
+    def _wrap_row(self, row: Any) -> Any:
+        if row is None or not self._is_postgres:
+            return row
+        if hasattr(self._cursor, "description") and self._cursor.description:
+            cols = [col[0] for col in self._cursor.description]
+            return RowDict(cols, row)
+        return row
+
     def fetchone(self) -> Any:
-        return self._cursor.fetchone()
+        row = self._cursor.fetchone()
+        return self._wrap_row(row)
 
     def fetchall(self) -> List[Any]:
-        return self._cursor.fetchall()
+        rows = self._cursor.fetchall()
+        if not rows or not self._is_postgres:
+            return rows
+        if hasattr(self._cursor, "description") and self._cursor.description:
+            cols = [col[0] for col in self._cursor.description]
+            return [RowDict(cols, r) for r in rows]
+        return rows
 
     def fetchmany(self, size: Optional[int] = None) -> List[Any]:
-        return self._cursor.fetchmany(size) if size else self._cursor.fetchmany()
+        rows = self._cursor.fetchmany(size) if size else self._cursor.fetchmany()
+        if not rows or not self._is_postgres:
+            return rows
+        if hasattr(self._cursor, "description") and self._cursor.description:
+            cols = [col[0] for col in self._cursor.description]
+            return [RowDict(cols, r) for r in rows]
+        return rows
 
     @property
     def rowcount(self) -> int:
@@ -531,7 +589,8 @@ class DialectCursorWrapper:
         return self._cursor.close()
 
     def __iter__(self) -> Generator[Any, None, None]:
-        return iter(self._cursor)
+        for row in self._cursor:
+            yield self._wrap_row(row)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._cursor, name)
@@ -732,8 +791,7 @@ def check_database_health(
 
     if engine_type == "postgresql":
         try:
-            import psycopg2
-            import psycopg2.extras
+            import pg8000.dbapi
         except ImportError:
             log_database_diagnostics(
                 backend_type="postgresql",
@@ -743,15 +801,17 @@ def check_database_health(
                 username=diag["username"],
                 has_database_url=diag["has_database_url"],
                 exc_type="ImportError",
-                exc_message="psycopg2 driver not installed",
+                exc_message="pg8000 driver not installed",
                 config_source=diag.get("config_source"),
                 is_pooler=diag.get("is_pooler"),
                 is_direct_supabase=diag.get("is_direct_supabase"),
+                driver="pg8000",
+                conn_result="FAILED",
             )
             return DatabaseHealth(
                 is_ready=False,
                 status_code="CONFIG_ERROR",
-                message="PostgreSQL driver (psycopg2) is not installed.",
+                message="PostgreSQL driver (pg8000) is not installed.",
                 backend_type="postgresql",
                 diagnostics=diag,
             )
@@ -759,11 +819,7 @@ def check_database_health(
         conn = None
         cursor = None
         try:
-            conn = psycopg2.connect(
-                target,
-                connect_timeout=10,
-                cursor_factory=psycopg2.extras.DictCursor,
-            )
+            conn = get_connection(database_url=target)
             cursor = conn.cursor()
             cursor.execute("SELECT 1;")
             result = cursor.fetchone()
@@ -779,6 +835,8 @@ def check_database_health(
                     config_source=diag.get("config_source"),
                     is_pooler=diag.get("is_pooler"),
                     is_direct_supabase=diag.get("is_direct_supabase"),
+                    driver="pg8000",
+                    conn_result="SUCCESS",
                 )
                 return DatabaseHealth(
                     is_ready=True,
@@ -788,6 +846,21 @@ def check_database_health(
                     diagnostics=diag,
                 )
             else:
+                log_database_diagnostics(
+                    backend_type="postgresql",
+                    host=diag["host"],
+                    port=diag["port"],
+                    database_name=diag["database_name"],
+                    username=diag["username"],
+                    has_database_url=diag["has_database_url"],
+                    exc_type="UnexpectedResult",
+                    exc_message="Query did not return 1",
+                    config_source=diag.get("config_source"),
+                    is_pooler=diag.get("is_pooler"),
+                    is_direct_supabase=diag.get("is_direct_supabase"),
+                    driver="pg8000",
+                    conn_result="FAILED",
+                )
                 return DatabaseHealth(
                     is_ready=False,
                     status_code="CONNECTION_ERROR",
@@ -809,9 +882,9 @@ def check_database_health(
             msg_lower = exc_msg.lower()
             if any(k in msg_lower for k in ["could not translate host", "no address associated", "gaierror", "name or service not known"]):
                 status_code = "DNS_ERROR"
-            elif any(k in msg_lower for k in ["password authentication failed", "role", "access denied", "authentication failed"]):
+            elif any(k in msg_lower for k in ["password authentication failed", "role", "access denied", "authentication failed", "scram"]):
                 status_code = "AUTH_ERROR"
-            elif any(k in msg_lower for k in ["timeout", "timed out", "unreachable", "refused", "could not connect", "ssl"]):
+            elif any(k in msg_lower for k in ["timeout", "timed out", "unreachable", "refused", "could not connect", "ssl", "can't create a connection"]):
                 status_code = "CONNECTION_ERROR"
             else:
                 status_code = "CONNECTION_ERROR"
@@ -828,6 +901,8 @@ def check_database_health(
                 config_source=diag.get("config_source"),
                 is_pooler=diag.get("is_pooler"),
                 is_direct_supabase=diag.get("is_direct_supabase"),
+                driver="pg8000",
+                conn_result="FAILED",
             )
             return DatabaseHealth(
                 is_ready=False,

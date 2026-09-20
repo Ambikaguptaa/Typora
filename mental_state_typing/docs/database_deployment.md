@@ -149,3 +149,11 @@ Health status is evaluated via `SELECT 1;` with immediate connection cleanup:
 - `DNS_ERROR`: Hostname resolution failure (e.g. attempting to resolve direct IPv6 Supabase host).
 - `AUTH_ERROR`: Bad username or password.
 - `CONNECTION_ERROR`: TCP timeout, network unreachable, or SSL negotiation failure.
+
+### 3.6 PostgreSQL Driver & Native Segmentation Fault Prevention
+The production deployment uses `pg8000>=1.30.0`, a **100% pure-Python** PostgreSQL driver:
+- **No Compiled C Extensions**: Unlike `psycopg2-binary`, `pg8000` contains zero compiled native binaries and zero bundled `libpq.so`/`libssl.so` libraries.
+- **Zero Native Symbol Conflicts**: Prevents glibc / OpenSSL thread-local storage collisions when running alongside TensorFlow 2.21.0, PyArrow, and Streamlit in Linux container environments.
+- **Safe SSL**: Leverages Python's standard library `ssl.create_default_context()` and `scramp` for SCRAM-SHA-256 authentication over Supabase pooler connections.
+- **Cached Lazy Initialization**: Database schema DDL is executed once per process lifetime via `@st.cache_resource`, and connection health is cached via `@st.cache_data(ttl=60)` to eliminate connection storms and port exhaustion on rerun.
+

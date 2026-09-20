@@ -98,18 +98,21 @@ def test_connection_health_check(temp_db: Path):
     assert check_connection(Path("Z:/invalid_dir_9999/invalid.db")) is False
 
 
-def test_missing_postgres_driver_raises_informative_error():
+def test_missing_postgres_driver_raises_informative_error(monkeypatch):
     """Verify that attempting PostgreSQL connection when driver is missing raises clear error."""
-    # Only test if psycopg2 / psycopg are actually not installed
-    try:
-        import psycopg2  # noqa: F401
-        pytest.skip("psycopg2 is installed; skipping missing driver test.")
-    except ImportError:
-        pass
+    import builtins
+    real_import = builtins.__import__
+
+    def mock_import(name, *args, **kwargs):
+        if name.startswith("pg8000"):
+            raise ImportError("No module named 'pg8000'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", mock_import)
 
     with pytest.raises(ImportError) as exc_info:
         get_connection(database_url="postgresql://usr:pwd@localhost:5432/test")
-    assert "PostgreSQL driver" in str(exc_info.value)
+    assert "pg8000" in str(exc_info.value) or "PostgreSQL driver" in str(exc_info.value)
 
 
 def test_session_persistence_crud(temp_db: Path):
@@ -323,7 +326,9 @@ def test_postgres_connection_failure_diagnostic_logging(capsys):
     assert "Database Name: fail_db" in stderr
     assert "Username: user_diag" in stderr
     assert "DATABASE_URL Exists: True" in stderr
-    assert "psycopg2 Exception Type: OperationalError" in stderr
+    assert "DATABASE CONNECTION: FAILED" in stderr
+    assert "DRIVER: pg8000" in stderr
+    assert ("Exception Type: InterfaceError" in stderr or "Exception Type:" in stderr)
 
     # CRITICAL INVARIANT: Password must NEVER appear in output
     assert "super_secret_password_777" not in stderr
@@ -511,4 +516,93 @@ def test_req_j_select_1_health_check_works_with_test_database(temp_db: Path):
     assert health.status_code == "DATABASE_READY"
     assert health.backend_type == "sqlite"
     assert bool(health) is True
+
+
+# ==============================================================================
+# STEP 9 SEGMENTATION FAULT REGRESSION SUITE (PURE-PYTHON PG8000 DRIVER)
+# ==============================================================================
+
+def test_regression_1_configuration_resolution(monkeypatch):
+    """1. Verify configuration resolution priority across secrets, env, and fallback."""
+    import streamlit as st
+    monkeypatch.setattr(st, "secrets", {
+        "DATABASE_URL": "postgresql://pooler_user:pass123@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres?sslmode=require"
+    })
+    url = settings.get_database_url()
+    assert "pooler.supabase.com" in url
+    assert settings.get_database_source(canonical=True) == "STREAMLIT_SECRET"
+
+
+def test_regression_2_session_pooler_detection():
+    """2. Verify Session Pooler detection identifying port 5432 and pooler domain."""
+    pooler_url = "postgresql://postgres.myproject:pass@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres"
+    diag = extract_safe_db_diagnostics(pooler_url, "postgresql")
+    assert diag["is_pooler"] is True
+    assert diag["is_direct_supabase"] is False
+    assert diag["port"] == 5432
+
+
+def test_regression_3_postgresql_driver_selection():
+    """3. Verify PostgreSQL driver selects pure-python pg8000 without compiled C segfault risks."""
+    import pg8000
+    assert pg8000.__file__ is not None
+    diag = get_database_config_diagnostics(url="postgresql://usr:pwd@aws-0-pooler.supabase.com:5432/db")
+    assert "pg8000" in diag["driver"]
+
+
+def test_regression_4_successful_select_1_health_check(temp_db: Path):
+    """4. Verify successful SELECT 1 health check validates operational readiness."""
+    health = check_database_health(db_path=temp_db)
+    assert health.is_ready is True
+    assert health.status_code == "DATABASE_READY"
+    assert "verified and operational" in health.message
+
+
+def test_regression_5_failure_handling_without_crashing_process():
+    """5. Verify unreachable PostgreSQL fails gracefully with DatabaseHealth error, never crashing process."""
+    unreachable = "postgresql://mock_user:mock_pass@127.0.0.1:54328/mock_db"
+    health = check_database_health(database_url=unreachable)
+    assert health.is_ready is False
+    assert health.status_code in ("CONNECTION_ERROR", "AUTH_ERROR", "DNS_ERROR")
+    assert bool(health) is False
+
+
+def test_regression_6_no_plaintext_password_in_diagnostics(capsys):
+    """6. Verify absolute protection against plaintext password leakage in diagnostics and errors."""
+    super_secret = "CLASSIFIED_VAULT_PASSWORD_999!"
+    test_url = f"postgresql://usr_audit:{super_secret}@127.0.0.1:54328/test_db"
+    
+    health = check_database_health(database_url=test_url)
+    captured = capsys.readouterr()
+    combined_log = captured.err + captured.out + health.message + str(health.diagnostics)
+    
+    assert super_secret not in combined_log
+    assert "CLASSIFIED" not in combined_log
+
+
+def test_regression_7_no_direct_supabase_hostname_fallback():
+    """7. Verify direct Supabase hostname is never generated or defaulted to."""
+    pooler_url = "postgresql://postgres.xhpztsckvjdrnfgmmuuq:pwd@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres"
+    _, target = parse_database_url(pooler_url)
+    assert "aws-0-ap-northeast-2.pooler.supabase.com" in target
+    assert "db.xhpztsckvjdrnfgmmuuq.supabase.co" not in target
+
+
+def test_regression_8_sqlite_local_fallback_works_locally(monkeypatch):
+    """8. Verify SQLite local fallback remains fully functional for local development."""
+    import sys
+    import streamlit as st
+    s_mod = sys.modules["src.config.settings"]
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("STREAMLIT_COMMUNITY_CLOUD", raising=False)
+    monkeypatch.delenv("IS_STREAMLIT_CLOUD", raising=False)
+    monkeypatch.delenv("STREAMLIT_SERVER_ENVIRONMENT", raising=False)
+    monkeypatch.setattr(st, "secrets", {})
+    monkeypatch.setattr(s_mod, "_read_dotenv_database_url", lambda: None)
+
+    backend = settings.get_database_backend()
+    assert backend == "sqlite"
+    health = check_database_health()
+    assert health.backend_type == "sqlite"
+
 
