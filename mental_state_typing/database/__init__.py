@@ -1,7 +1,9 @@
 """Database package for local SQLite and cloud PostgreSQL persistence."""
 
 from database.database import (
+    DatabaseHealth,
     check_connection,
+    check_database_health,
     delete_assessment_record,
     get_assessment_by_id,
     get_assessment_records,
@@ -18,7 +20,9 @@ from database.database import (
 )
 
 __all__ = [
+    "DatabaseHealth",
     "check_connection",
+    "check_database_health",
     "delete_assessment_record",
     "get_assessment_by_id",
     "get_assessment_records",

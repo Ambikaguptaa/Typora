@@ -20,7 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from database.database import check_connection, init_db
+from database.database import check_connection, check_database_health, init_db
 from src.assessment.report_generator import generate_markdown_report, generate_text_report
 from src.config.settings import settings
 from src.data_engineering.baseline import (
@@ -138,10 +138,17 @@ def render_sidebar(engine: BehavioralEngine) -> str:
         st.markdown("<hr style='border: none; border-top: 1px solid #242B36; margin: 14px 0;'>", unsafe_allow_html=True)
 
         settings.ensure_directories()
-        init_db()
-        db_alive = check_connection()
+        try:
+            init_db()
+        except Exception as e:
+            logger.error(f"Handled database initialization error: {e}")
+
+        health = check_database_health()
+        db_alive = bool(health)
         db_led = "ready" if db_alive else "critical"
-        db_status = "ONLINE" if db_alive else "OFFLINE"
+        db_status = "ONLINE" if db_alive else f"OFFLINE ({health.status_code})"
+        is_cloud_pg = settings.get_database_backend() == "postgresql"
+        db_backend_label = "PostgreSQL (Cloud)" if is_cloud_pg else "SQLite (Local)"
 
         # Truthful system overview from backend status aggregator
         sys_status = get_system_overview_status(engine)
@@ -151,7 +158,7 @@ def render_sidebar(engine: BehavioralEngine) -> str:
             <div class="recessed-panel">
                 <div class="readout-label">SYSTEM READINESS AUDIT</div>
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 6px;">
-                    <span style="font-size: 0.8rem; color: #E9EEF5;">SQLite Database</span>
+                    <span style="font-size: 0.8rem; color: #E9EEF5;">{db_backend_label}</span>
                     <div class="led-indicator">
                         <span class="led-dot {db_led}"></span>
                         <span>{db_status}</span>

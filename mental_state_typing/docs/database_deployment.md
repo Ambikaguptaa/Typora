@@ -103,7 +103,7 @@ dbname = "postgres"
 > **Direct Supabase endpoints (`db.<project-ref>.supabase.co:5432`) resolve only via IPv6.**  
 > Streamlit Community Cloud runs in AWS environments without outbound IPv6 routing. Attempting to use the direct host will result in connection timeouts or `could not translate host name "db.<ref>.supabase.co"` / `Network is unreachable`.
 > 
-> **Solution**:
+> **Required Configuration (Session Pooler)**:
 > 1. In your Supabase Dashboard, go to **Project Settings > Database > Connection Pooling**.
 > 2. Select **Session** mode.
 > 3. Use port **5432**.
@@ -111,5 +111,23 @@ dbname = "postgres"
 > 5. Host is `aws-0-[region].pooler.supabase.com`.
 > 6. Append `?sslmode=require`.
 
-3. `Settings.get_database_url()` automatically discovers `st.secrets["DATABASE_URL"]` or `st.secrets["postgres"]` and switches the storage backend to PostgreSQL.
-4. If no cloud secrets are found, the system gracefully falls back to local SQLite at `database/mental_state.db`.
+### 3.2 Configuration Resolution Precedence
+The application resolves database configuration using a strict deterministic priority order:
+1. **Streamlit Secrets `st.secrets["DATABASE_URL"]`** (Authoritative in cloud deployments; cannot be overridden by local `.env` or container environment).
+2. **Streamlit Secrets `st.secrets["database_url"]`** (Lowercase variant).
+3. **Streamlit Secrets `st.secrets["connections"]["postgresql"]["url"]`** (Streamlit SQL connection format).
+4. **Streamlit Secrets `st.secrets["postgres"]["url"]` or table** (`st.secrets["postgres"]`).
+5. **Streamlit Secrets `st.secrets["postgresql"]["url"]`**.
+6. **Environment Variable `DATABASE_URL`** (`os.environ["DATABASE_URL"]`, used for Docker/CLI workflows).
+7. **Local SQLite Fallback** (`database/mental_state.db`, active ONLY when no secrets or env vars are present).
+
+### 3.3 Strict No-Silent-Fallback Invariant
+> [!WARNING]
+> **Cloud Deployments Never Silently Fall Back to SQLite.**  
+> If external PostgreSQL fails (e.g. DNS failure, auth error, network timeout), the application will **NEVER** silently switch to SQLite. Silently falling back to SQLite on Streamlit Cloud would give a false appearance of operation while writing user records to an ephemeral filesystem that is wiped on container reboot.
+> 
+> Instead, the application:
+> - Traps the database failure at the error boundary to prevent whole-app crashing.
+> - Reports the truthful status in the sidebar: `OFFLINE (DNS_ERROR)`, `OFFLINE (AUTH_ERROR)`, or `OFFLINE (CONNECTION_ERROR)`.
+> - Emits a safe diagnostic block to `stderr` indicating the config source, masked host, masked user, and exact exception reason.
+> - Preserves local SQLite exclusively for genuine local development workflows.

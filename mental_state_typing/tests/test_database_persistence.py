@@ -17,7 +17,9 @@ from pathlib import Path
 import pytest
 
 from database.database import (
+    DatabaseHealth,
     check_connection,
+    check_database_health,
     delete_assessment_record,
     extract_safe_db_diagnostics,
     get_assessment_by_id,
@@ -269,7 +271,7 @@ def test_extract_safe_db_diagnostics_masks_credentials():
 
 
 def test_log_database_diagnostics_format(capsys):
-    """Verify log_database_diagnostics outputs the exact 8 required fields and masks passwords."""
+    """Verify log_database_diagnostics outputs the exact required fields and masks passwords."""
     log_database_diagnostics(
         backend_type="postgresql",
         host="aws-0-us-east-1.pooler.supabase.com",
@@ -283,6 +285,14 @@ def test_log_database_diagnostics_format(capsys):
     captured = capsys.readouterr()
     stderr = captured.err
 
+    assert "DATABASE CONFIG SOURCE:" in stderr
+    assert "DB BACKEND: postgresql" in stderr
+    assert "DB HOST: aws-0-us-east-1.*.pooler.supabase.com" in stderr
+    assert "DB PORT: 5432" in stderr
+    assert "DB USER: postgres.mypr****" in stderr
+    assert "DB NAME: postgres" in stderr
+    assert "POOLER DETECTED: True" in stderr
+    assert "DIRECT SUPABASE HOST DETECTED: False" in stderr
     assert "Backend Type: postgresql" in stderr
     assert "Host: aws-0-us-east-1.pooler.supabase.com" in stderr
     assert "Port: 5432" in stderr
@@ -297,7 +307,7 @@ def test_postgres_connection_failure_diagnostic_logging(capsys):
     """Verify that PostgreSQL connection failure logs safe diagnostics and conceals password."""
     unreachable_url = "postgresql://user_diag:super_secret_password_777@127.0.0.1:54329/fail_db"
     
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(Exception):
         get_connection(database_url=unreachable_url)
 
     captured = capsys.readouterr()
@@ -315,4 +325,156 @@ def test_postgres_connection_failure_diagnostic_logging(capsys):
 
     # CRITICAL INVARIANT: Password must NEVER appear in output
     assert "super_secret_password_777" not in stderr
+
+
+# ==============================================================================
+# 10 MANDATORY REQUIREMENT TESTS (A THROUGH J)
+# ==============================================================================
+
+def test_req_a_streamlit_secrets_wins_over_env(monkeypatch):
+    """A. Verify DATABASE_URL from Streamlit secrets wins over environment variables."""
+    # Set conflicting environment variable
+    monkeypatch.setenv("DATABASE_URL", "postgresql://env_user:env_pass@env-host:5432/env_db")
+
+    # Mock st.secrets with authoritative cloud secret
+    import streamlit as st
+    monkeypatch.setattr(st, "secrets", {
+        "DATABASE_URL": "postgresql://secret_user:secret_pass@aws-0-us-east-1.pooler.supabase.com:5432/secret_db"
+    })
+
+    url = settings.get_database_url()
+    source = settings.get_database_source()
+
+    assert "aws-0-us-east-1.pooler.supabase.com" in url
+    assert "env-host" not in url
+    assert "secret_user" in url
+    assert source == "DATABASE_URL FROM STREAMLIT SECRETS"
+
+
+def test_req_b_local_sqlite_fallback_when_running_locally(monkeypatch):
+    """B. Verify local SQLite fallback works when running locally without secrets or env."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    import streamlit as st
+    monkeypatch.setattr(st, "secrets", {})
+
+    url = settings.get_database_url()
+    backend = settings.get_database_backend()
+    source = settings.get_database_source()
+
+    assert backend == "sqlite"
+    assert url.startswith("sqlite:///")
+    assert "mental_state.db" in url
+    assert source == "LOCAL SQLITE FALLBACK"
+
+
+def test_req_c_direct_supabase_host_not_generated_from_project_id():
+    """C. Verify that direct Supabase host db.<ref>.supabase.co is NOT generated from project id."""
+    pooler_url = "postgresql://postgres.xhpztsckvjdrnfgmmuuq:pass@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require"
+    eng, target = parse_database_url(pooler_url)
+
+    assert eng == "postgresql"
+    # Verify pooler host is preserved exactly and not converted to db.*.supabase.co
+    assert "aws-0-us-east-1.pooler.supabase.com" in target
+    assert "db.xhpztsckvjdrnfgmmuuq.supabase.co" not in target
+
+
+def test_req_d_pooler_url_is_accepted():
+    """D. Verify that Supabase Session Pooler URL is accepted and recognized as pooler."""
+    pooler_url = "postgresql://postgres.myproject:my_pass@aws-0-eu-central-1.pooler.supabase.com:5432/postgres"
+    diag = extract_safe_db_diagnostics(pooler_url, "postgresql")
+
+    assert diag["backend_type"] == "postgresql"
+    assert diag["port"] == 5432
+    assert diag["is_pooler"] is True
+    assert diag["is_direct_supabase"] is False
+    assert diag["host"] == "aws-0-eu-central-1.pooler.supabase.com"
+
+
+def test_req_e_secret_values_never_logged(capsys):
+    """E. Verify that secret values (passwords, tokens) are never logged."""
+    secret_pass = "top_secret_token_xyz_987654"
+    dirty_url = f"postgresql://usr:{secret_pass}@aws-0-us-east-1.pooler.supabase.com:5432/db"
+
+    clean_url = sanitize_database_url_for_logging(dirty_url)
+    assert secret_pass not in clean_url
+    assert "********" in clean_url
+
+    diag = extract_safe_db_diagnostics(dirty_url, "postgresql")
+    assert secret_pass not in str(diag)
+
+    log_database_diagnostics(
+        backend_type="postgresql",
+        host="aws-0-us-east-1.pooler.supabase.com",
+        port=5432,
+        database_name="db",
+        username="usr",
+        has_database_url=True,
+    )
+    captured = capsys.readouterr()
+    assert secret_pass not in captured.err
+
+
+def test_req_f_password_is_masked():
+    """F. Verify password masking in diagnostics and sanitizers."""
+    complex_passwords = [
+        "pass!@#123",
+        "P@$$w0rd%2Fwith%20encoded",
+        "extremely_long_complex_pass_phrase_abcdefg",
+    ]
+    for pwd in complex_passwords:
+        url = f"postgresql://myuser:{pwd}@localhost:5432/mydb"
+        sanitized = sanitize_database_url_for_logging(url)
+        assert pwd not in sanitized
+        assert "********" in sanitized
+
+        diag = extract_safe_db_diagnostics(url, "postgresql")
+        assert pwd not in str(diag)
+
+
+def test_req_g_invalid_or_missing_database_url_controlled_diagnostic():
+    """G. Verify invalid/missing DATABASE_URL produces controlled diagnostic without unhandled crash."""
+    health = check_database_health(database_url="invalid://malformed:uri/without/schema")
+    assert health.is_ready is False
+    assert health.status_code in ("CONFIG_ERROR", "CONNECTION_ERROR")
+
+
+def test_req_h_postgresql_connection_health_check():
+    """H. Verify PostgreSQL connection health test accurately classifies errors."""
+    unreachable_url = "postgresql://user:pass@127.0.0.1:54329/testdb"
+    health = check_database_health(database_url=unreachable_url)
+
+    assert health.is_ready is False
+    assert health.status_code == "CONNECTION_ERROR"
+    assert health.backend_type == "postgresql"
+    assert "pass" not in health.message
+
+
+def test_req_i_database_initialization(temp_db: Path):
+    """I. Verify database schema initializes all 5 persistent tables."""
+    success = init_db(temp_db)
+    assert success is True
+
+    with get_db_cursor(temp_db) as cursor:
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = {row[0] for row in cursor.fetchall()}
+
+    expected = {"sessions", "typing_metrics", "assessments", "baseline_profiles", "audit_logs"}
+    assert expected.issubset(tables)
+
+
+def test_req_j_no_accidental_sqlite_fallback_in_cloud_mode(monkeypatch):
+    """J. Verify cloud mode never silently switches to SQLite on PostgreSQL failure."""
+    import streamlit as st
+    monkeypatch.setattr(st, "secrets", {
+        "DATABASE_URL": "postgresql://usr:pass@127.0.0.1:54329/cloud_db"
+    })
+
+    # The backend MUST remain postgresql
+    assert settings.get_database_backend() == "postgresql"
+
+    # Failed connection check must report offline postgresql, NOT switch to sqlite
+    health = check_database_health()
+    assert health.is_ready is False
+    assert health.backend_type == "postgresql"
+    assert settings.get_database_backend() == "postgresql"
 

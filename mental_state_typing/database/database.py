@@ -39,44 +39,141 @@ def sanitize_database_url_for_logging(url: str) -> str:
     return re.sub(r"://([^:]+):([^@]+)@", r"://\1:********@", url)
 
 
-def extract_safe_db_diagnostics(target: str, engine_type: str) -> Dict[str, Any]:
+class DatabaseHealth:
+    """Truthful database health status object with error categorization and boolean evaluation."""
+
+    def __init__(
+        self,
+        is_ready: bool,
+        status_code: str,
+        message: str,
+        backend_type: str,
+        diagnostics: Optional[Dict[str, Any]] = None,
+    ):
+        self.is_ready = bool(is_ready)
+        # One of: DATABASE_READY, DNS_ERROR, AUTH_ERROR, CONNECTION_ERROR, CONFIG_ERROR
+        self.status_code = status_code
+        self.message = message
+        self.backend_type = backend_type
+        self.diagnostics = diagnostics or {}
+
+    def __bool__(self) -> bool:
+        return self.is_ready
+
+    def __repr__(self) -> str:
+        return f"<DatabaseHealth status={self.status_code} ready={self.is_ready} backend={self.backend_type}>"
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, bool):
+            return self.is_ready == other
+        if isinstance(other, DatabaseHealth):
+            return self.is_ready == other.is_ready and self.status_code == other.status_code
+        return False
+
+
+def mask_hostname_safely(host: Optional[str]) -> str:
+    """Mask sensitive host identifiers while preserving domain structure."""
+    if not host or host in ("localhost", "127.0.0.1", "parse_error", "unknown", "N/A"):
+        return host or "unknown"
+    if "pooler.supabase.com" in host:
+        # e.g. aws-0-us-east-1.pooler.supabase.com -> aws-0-*.pooler.supabase.com
+        parts = host.split(".")
+        return f"{parts[0]}.*.pooler.supabase.com"
+    if host.endswith(".supabase.co"):
+        # e.g. db.xhpztsckvjdrnfgmmuuq.supabase.co -> db.xhpz****.supabase.co
+        parts = host.split(".")
+        if len(parts) >= 3 and parts[0] == "db":
+            sub = parts[1]
+            masked_sub = sub[:4] + "****" if len(sub) > 4 else "****"
+            return f"db.{masked_sub}.supabase.co"
+        return "****.supabase.co"
+    if len(host) > 12:
+        return host[:4] + "****" + host[-6:]
+    return host
+
+
+def mask_username_safely(username: Optional[str]) -> str:
+    """Mask username credentials while revealing pooler tenant structure."""
+    if not username or username in ("local", "unknown", "N/A"):
+        return username or "unknown"
+    if "." in username:
+        # e.g. postgres.xhpztsckvjdrnfgmmuuq -> postgres.xhpz****
+        prefix, suffix = username.split(".", 1)
+        masked_suffix = suffix[:4] + "****" if len(suffix) > 4 else "****"
+        return f"{prefix}.{masked_suffix}"
+    if len(username) > 4:
+        return username[:3] + "****"
+    return username[:1] + "****"
+
+
+def extract_safe_db_diagnostics(
+    target: str,
+    engine_type: str,
+    config_source: Optional[str] = None,
+) -> Dict[str, Any]:
     """Extract safe database metadata for diagnostic logging without exposing passwords.
 
     Returns dictionary containing only:
+    - config_source
     - backend_type
     - host (with password removed)
+    - masked_host
     - port
     - database_name
     - username (with password removed)
+    - masked_username
+    - is_pooler (boolean)
+    - is_direct_supabase (boolean)
     - has_database_url (boolean)
     """
+    resolved_source = config_source or settings.get_database_source()
     if not target or engine_type == "sqlite":
         return {
+            "config_source": resolved_source,
             "backend_type": "sqlite",
             "host": "localhost",
+            "masked_host": "localhost",
             "port": "N/A",
             "database_name": target or str(settings.database_path),
             "username": "local",
+            "masked_username": "local",
+            "is_pooler": False,
+            "is_direct_supabase": False,
             "has_database_url": bool(target),
         }
 
     try:
         parsed = urlparse(target)
+        raw_host = parsed.hostname or "unknown"
+        raw_user = parsed.username or "unknown"
+        is_pooler = "pooler.supabase.com" in raw_host
+        is_direct = raw_host.endswith(".supabase.co") and not is_pooler
+
         return {
+            "config_source": resolved_source,
             "backend_type": engine_type,
-            "host": parsed.hostname or "unknown",
+            "host": raw_host,
+            "masked_host": mask_hostname_safely(raw_host),
             "port": parsed.port or 5432,
             "database_name": parsed.path.lstrip("/") if parsed.path else "unknown",
-            "username": parsed.username or "unknown",
+            "username": raw_user,
+            "masked_username": mask_username_safely(raw_user),
+            "is_pooler": is_pooler,
+            "is_direct_supabase": is_direct,
             "has_database_url": bool(target),
         }
     except Exception:
         return {
+            "config_source": resolved_source,
             "backend_type": engine_type,
             "host": "parse_error",
+            "masked_host": "parse_error",
             "port": 5432,
             "database_name": "unknown",
             "username": "unknown",
+            "masked_username": "unknown",
+            "is_pooler": False,
+            "is_direct_supabase": False,
             "has_database_url": bool(target),
         }
 
@@ -90,16 +187,39 @@ def log_database_diagnostics(
     has_database_url: bool,
     exc_type: Optional[str] = None,
     exc_message: Optional[str] = None,
+    config_source: Optional[str] = None,
+    is_pooler: Optional[bool] = None,
+    is_direct_supabase: Optional[bool] = None,
 ) -> None:
     """Print and log safe database connection diagnostics with no passwords exposed."""
+    src = config_source or settings.get_database_source()
+    raw_host = host or "N/A"
+    raw_user = username or "N/A"
+    masked_h = mask_hostname_safely(raw_host) if raw_host != "N/A" else "N/A"
+    masked_u = mask_username_safely(raw_user) if raw_user != "N/A" else "N/A"
+    pooler_flag = is_pooler if is_pooler is not None else ("pooler.supabase.com" in str(raw_host))
+    direct_flag = (
+        is_direct_supabase
+        if is_direct_supabase is not None
+        else (str(raw_host).endswith(".supabase.co") and not pooler_flag)
+    )
+
     msg_lines = [
         "=== DATABASE CONNECTION DIAGNOSTIC ===",
+        f"DATABASE CONFIG SOURCE: {src}",
+        f"DB BACKEND: {backend_type}",
+        f"DB HOST: {masked_h}",
+        f"DB PORT: {port or 'N/A'}",
+        f"DB USER: {masked_u}",
+        f"DB NAME: {database_name or 'N/A'}",
+        f"POOLER DETECTED: {pooler_flag}",
+        f"DIRECT SUPABASE HOST DETECTED: {direct_flag}",
+        f"DATABASE_URL Exists: {has_database_url}",
         f"Backend Type: {backend_type}",
-        f"Host: {host or 'N/A'}",
+        f"Host: {raw_host}",
         f"Port: {port or 'N/A'}",
         f"Database Name: {database_name or 'N/A'}",
-        f"Username: {username or 'N/A'}",
-        f"DATABASE_URL Exists: {has_database_url}",
+        f"Username: {raw_user}",
         f"psycopg2 Exception Type: {exc_type or 'None'}",
         f"psycopg2 Exception Message: {exc_message or 'None'}",
         "======================================",
@@ -143,6 +263,8 @@ def parse_database_url(url: Optional[str] = None) -> Tuple[str, str]:
     elif db_url.startswith("sqlite://"):
         target = db_url[len("sqlite://") :]
         return "sqlite", target
+    elif "://" in db_url:
+        return "unknown", db_url
 
     return "sqlite", str(settings.database_path)
 
@@ -173,6 +295,9 @@ def get_connection(
         return conn
 
     engine_type, target = parse_database_url(database_url)
+
+    if engine_type == "unknown":
+        raise ValueError(f"Unsupported database scheme in URL: {sanitize_database_url_for_logging(target)}")
 
     if engine_type == "postgresql":
         diag = extract_safe_db_diagnostics(target, engine_type)
@@ -231,6 +356,9 @@ def get_connection(
             has_database_url=diag["has_database_url"],
             exc_type=None,
             exc_message=None,
+            config_source=diag.get("config_source"),
+            is_pooler=diag.get("is_pooler"),
+            is_direct_supabase=diag.get("is_direct_supabase"),
         )
 
         try:
@@ -262,6 +390,9 @@ def get_connection(
                 has_database_url=diag["has_database_url"],
                 exc_type=exc_type,
                 exc_message=exc_msg,
+                config_source=diag.get("config_source"),
+                is_pooler=diag.get("is_pooler"),
+                is_direct_supabase=diag.get("is_direct_supabase"),
             )
             if host.endswith(".supabase.co") and not host.startswith("aws-0-") and "pooler" not in host:
                 pooler_advice = (
@@ -474,24 +605,212 @@ def init_db(
         return False
 
 
+def check_database_health(
+    db_path: Optional[Union[str, Path]] = None,
+    database_url: Optional[str] = None,
+) -> DatabaseHealth:
+    """Test database connectivity with truthful categorization and safe diagnostics.
+
+    Returns:
+        DatabaseHealth: Status object distinguishing:
+        - DATABASE_READY
+        - DNS_ERROR
+        - AUTH_ERROR
+        - CONNECTION_ERROR
+        - CONFIG_ERROR
+    """
+    url_target = database_url if db_path is None else f"sqlite:///{db_path}"
+    engine_type, target = parse_database_url(url_target)
+    diag = extract_safe_db_diagnostics(target, engine_type)
+
+    if engine_type == "unknown":
+        log_database_diagnostics(
+            backend_type="unknown",
+            host=diag.get("host"),
+            port=diag.get("port"),
+            database_name=diag.get("database_name"),
+            username=diag.get("username"),
+            has_database_url=diag.get("has_database_url", False),
+            exc_type="ConfigurationError",
+            exc_message=f"Unsupported or malformed database URL scheme in: {sanitize_database_url_for_logging(target)}",
+            config_source=diag.get("config_source"),
+        )
+        return DatabaseHealth(
+            is_ready=False,
+            status_code="CONFIG_ERROR",
+            message=f"Unsupported or malformed database URL scheme in: {sanitize_database_url_for_logging(target)}",
+            backend_type="unknown",
+            diagnostics=diag,
+        )
+
+    if engine_type == "postgresql":
+        try:
+            import psycopg2
+            import psycopg2.extras
+        except ImportError:
+            log_database_diagnostics(
+                backend_type="postgresql",
+                host=diag["host"],
+                port=diag["port"],
+                database_name=diag["database_name"],
+                username=diag["username"],
+                has_database_url=diag["has_database_url"],
+                exc_type="ImportError",
+                exc_message="psycopg2 driver not installed",
+                config_source=diag.get("config_source"),
+                is_pooler=diag.get("is_pooler"),
+                is_direct_supabase=diag.get("is_direct_supabase"),
+            )
+            return DatabaseHealth(
+                is_ready=False,
+                status_code="CONFIG_ERROR",
+                message="PostgreSQL driver (psycopg2) is not installed.",
+                backend_type="postgresql",
+                diagnostics=diag,
+            )
+
+        conn = None
+        cursor = None
+        try:
+            conn = psycopg2.connect(
+                target,
+                connect_timeout=10,
+                cursor_factory=psycopg2.extras.DictCursor,
+            )
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1;")
+            result = cursor.fetchone()
+            is_ok = result is not None and result[0] == 1
+            if is_ok:
+                log_database_diagnostics(
+                    backend_type="postgresql",
+                    host=diag["host"],
+                    port=diag["port"],
+                    database_name=diag["database_name"],
+                    username=diag["username"],
+                    has_database_url=diag["has_database_url"],
+                    config_source=diag.get("config_source"),
+                    is_pooler=diag.get("is_pooler"),
+                    is_direct_supabase=diag.get("is_direct_supabase"),
+                )
+                return DatabaseHealth(
+                    is_ready=True,
+                    status_code="DATABASE_READY",
+                    message="PostgreSQL connection verified and operational.",
+                    backend_type="postgresql",
+                    diagnostics=diag,
+                )
+            else:
+                return DatabaseHealth(
+                    is_ready=False,
+                    status_code="CONNECTION_ERROR",
+                    message="Database query returned unexpected result.",
+                    backend_type="postgresql",
+                    diagnostics=diag,
+                )
+        except Exception as e:
+            exc_type = type(e).__name__
+            raw_msg = str(e).strip()
+            exc_msg = sanitize_database_url_for_logging(raw_msg)
+            try:
+                parsed = urlparse(target)
+                if parsed.password and parsed.password in exc_msg:
+                    exc_msg = exc_msg.replace(parsed.password, "********")
+            except Exception:
+                pass
+
+            msg_lower = exc_msg.lower()
+            if any(k in msg_lower for k in ["could not translate host", "no address associated", "gaierror", "name or service not known"]):
+                status_code = "DNS_ERROR"
+            elif any(k in msg_lower for k in ["password authentication failed", "role", "access denied", "authentication failed"]):
+                status_code = "AUTH_ERROR"
+            elif any(k in msg_lower for k in ["timeout", "timed out", "unreachable", "refused", "could not connect", "ssl"]):
+                status_code = "CONNECTION_ERROR"
+            else:
+                status_code = "CONNECTION_ERROR"
+
+            log_database_diagnostics(
+                backend_type="postgresql",
+                host=diag["host"],
+                port=diag["port"],
+                database_name=diag["database_name"],
+                username=diag["username"],
+                has_database_url=diag["has_database_url"],
+                exc_type=exc_type,
+                exc_message=exc_msg,
+                config_source=diag.get("config_source"),
+                is_pooler=diag.get("is_pooler"),
+                is_direct_supabase=diag.get("is_direct_supabase"),
+            )
+            return DatabaseHealth(
+                is_ready=False,
+                status_code=status_code,
+                message=exc_msg,
+                backend_type="postgresql",
+                diagnostics=diag,
+            )
+        finally:
+            if cursor:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    else:
+        # SQLite
+        try:
+            with get_db_cursor(db_path=db_path, database_url=database_url) as cursor:
+                cursor.execute("SELECT 1;")
+                result = cursor.fetchone()
+                if result is not None and result[0] == 1:
+                    return DatabaseHealth(
+                        is_ready=True,
+                        status_code="DATABASE_READY",
+                        message="SQLite connection verified and operational.",
+                        backend_type="sqlite",
+                        diagnostics=diag,
+                    )
+                return DatabaseHealth(
+                    is_ready=False,
+                    status_code="CONNECTION_ERROR",
+                    message="Unexpected result from SQLite.",
+                    backend_type="sqlite",
+                    diagnostics=diag,
+                )
+        except Exception as e:
+            safe_msg = sanitize_database_url_for_logging(str(e))
+            return DatabaseHealth(
+                is_ready=False,
+                status_code="CONNECTION_ERROR",
+                message=safe_msg,
+                backend_type="sqlite",
+                diagnostics=diag,
+            )
+
+
 def check_connection(
     db_path: Optional[Union[str, Path]] = None,
     database_url: Optional[str] = None,
-) -> bool:
+    return_health: bool = False,
+) -> Union[bool, DatabaseHealth]:
     """Test if the database can be connected to and executed upon.
 
+    Args:
+        db_path: Optional SQLite database file path.
+        database_url: Optional database connection string.
+        return_health: If True, returns rich DatabaseHealth object instead of bool.
+
     Returns:
-        bool: True if connection test succeeds, False otherwise.
+        bool by default (True if operational, False otherwise), or DatabaseHealth if return_health=True.
     """
-    try:
-        with get_db_cursor(db_path=db_path, database_url=database_url) as cursor:
-            cursor.execute("SELECT 1;")
-            result = cursor.fetchone()
-            return result is not None and result[0] == 1
-    except Exception as e:
-        safe_msg = sanitize_database_url_for_logging(str(e))
-        logger.warning(f"Database health check failed: {safe_msg}")
-        return False
+    health = check_database_health(db_path=db_path, database_url=database_url)
+    if return_health:
+        return health
+    return health.is_ready
 
 
 # ==============================================================================
