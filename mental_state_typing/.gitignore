@@ -12,6 +12,8 @@ env/
 # Environment variables & secrets
 .env
 *.env
+.streamlit/secrets.toml
+.streamlit/secrets.*
 
 # SQLite local database files
 *.db

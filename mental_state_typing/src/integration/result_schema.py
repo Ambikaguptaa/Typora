@@ -37,8 +37,10 @@ class FeatureSummary:
     event_count: int = 0
     duration_seconds: float = 0.0
     mean_dwell_ms: float = 0.0
+    std_dwell_ms: float = 0.0
     median_dwell_ms: float = 0.0
     mean_flight_ms: float = 0.0
+    std_flight_ms: float = 0.0
     median_flight_ms: float = 0.0
     pause_count: int = 0
     pause_rate: float = 0.0
@@ -46,6 +48,7 @@ class FeatureSummary:
     backspace_count: int = 0
     correction_count: int = 0
     error_rate: float = 0.0
+    sequence_windows_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -75,7 +78,7 @@ class ModelResult:
     """Sequential deep learning model inference and uncertainty evaluation."""
 
     status: str  # 'MODEL_NOT_READY' / 'MODEL_READY'
-    reason: str
+    reason: str = ""
     predicted_class: Optional[str] = None
     class_probabilities: Optional[Dict[str, float]] = None
     top_probability: Optional[float] = None
@@ -100,9 +103,9 @@ class BehavioralAssessmentResult:
     """
 
     session_id: str
-    session_type: str  # 'CALIBRATION' or 'ANALYSIS'
+    session_type: str  # 'CALIBRATION' / 'ANALYSIS'
     timestamp: str
-    pipeline_status: str
+    pipeline_status: str  # PipelineState.value
     data_quality: DataQualityResult
     feature_summary: FeatureSummary
     baseline_result: BaselineResult
@@ -110,21 +113,48 @@ class BehavioralAssessmentResult:
     assessment_result: Optional[Dict[str, Any]] = None
     privacy_status: str = "ENFORCED"
     warnings: List[str] = field(default_factory=list)
-    disclaimer: str = EVALUATION_DISCLAIMER
+    disclaimer: str = (
+        "Academic Research Instrument: This system estimates fine-motor behavioral "
+        "typing dynamics and does not provide medical or psychiatric diagnoses."
+    )
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert container to dictionary and audit against forbidden textual keys."""
-        data = asdict(self)
-        violations = audit_payload_for_sensitive_keys(data)
-        if violations:
-            raise ValueError(f"CRITICAL PRIVACY VIOLATION: Result contains forbidden fields: {violations}")
-        return data
+        """Convert assessment result to privacy-audited serializable dictionary."""
+        d = asdict(self)
+        # Deep audit for sensitive raw text keys before export
+        sensitive = audit_payload_for_sensitive_keys(d)
+        if sensitive:
+            raise ValueError(f"Privacy violation: sensitive keys detected in assessment payload: {sensitive}")
+        return d
 
-    def save_json(self, output_path: str | Path) -> Path:
-        """Persist structured assessment result to JSON after zero-text validation."""
-        path = Path(output_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def save_json(self, file_path: Path) -> Path:
+        """Serialize assessment safely to JSON file."""
+        file_path = Path(file_path)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
         payload = self.to_dict()
-        with open(path, "w", encoding="utf-8") as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-        return path
+        return file_path
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "BehavioralAssessmentResult":
+        """Reconstruct assessment object from dictionary safely."""
+        dq_data = data.get("data_quality", {})
+        feat_data = data.get("feature_summary", {})
+        base_data = data.get("baseline_result", {})
+        model_data = data.get("model_result", {})
+
+        return cls(
+            session_id=data.get("session_id", "sess_unknown"),
+            session_type=data.get("session_type", SessionType.ANALYSIS.value),
+            timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            pipeline_status=data.get("pipeline_status", PipelineState.ASSESSMENT_COMPLETE.value),
+            data_quality=DataQualityResult(**dq_data) if dq_data else DataQualityResult(is_valid=False, verdict="UNKNOWN"),
+            feature_summary=FeatureSummary(**feat_data) if feat_data else FeatureSummary(),
+            baseline_result=BaselineResult(**base_data) if base_data else BaselineResult(status="NOT_READY"),
+            model_result=ModelResult(**model_data) if model_data else ModelResult(status="MODEL_NOT_READY"),
+            assessment_result=data.get("assessment_result"),
+            privacy_status=data.get("privacy_status", "ENFORCED"),
+            warnings=data.get("warnings", []),
+            disclaimer=data.get("disclaimer", cls.disclaimer),
+        )

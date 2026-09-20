@@ -46,6 +46,46 @@ class Settings:
     database_path: Path = Path(
         os.getenv("DATABASE_PATH", BASE_DIR / "database" / "mental_state.db")
     )
+    database_url: str = os.getenv("DATABASE_URL", "")
+
+    def get_database_url(self) -> str:
+        """Resolve the active database URL with environment and Streamlit secrets support.
+
+        Resolution priority:
+        1. Explicit DATABASE_URL environment variable
+        2. Streamlit secrets (st.secrets['DATABASE_URL'] or st.secrets['postgres']['url'])
+        3. Local SQLite fallback (database_path)
+        """
+        if self.database_url:
+            return self.database_url
+
+        # Check Streamlit secrets if running in Streamlit runtime
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets"):
+                if "DATABASE_URL" in st.secrets:
+                    return str(st.secrets["DATABASE_URL"])
+                if "postgres" in st.secrets and isinstance(st.secrets["postgres"], dict):
+                    pg = st.secrets["postgres"]
+                    if "url" in pg:
+                        return str(pg["url"])
+                    user = pg.get("user", "")
+                    pwd = pg.get("password", "")
+                    host = pg.get("host", "localhost")
+                    port = pg.get("port", 5432)
+                    dbname = pg.get("dbname", "postgres")
+                    return f"postgresql://{user}:{pwd}@{host}:{port}/{dbname}"
+        except Exception:
+            pass
+
+        return f"sqlite:///{self.database_path.resolve().as_posix()}"
+
+    def get_database_backend(self) -> str:
+        """Return the database backend engine type ('sqlite' or 'postgresql')."""
+        url = self.get_database_url()
+        if url.startswith("postgresql://") or url.startswith("postgres://"):
+            return "postgresql"
+        return "sqlite"
 
     # Privacy & Anonymization
     pseudonymization_salt: str = os.getenv(

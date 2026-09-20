@@ -1,6 +1,8 @@
 """Dashboard layout and Streamlit UI component helper.
 
 Provides reusable skeuomorphic presentation components for the Streamlit web interface.
+Includes console headers, instrument readout grids, quality panels, signal indicators,
+privacy banners, system masthead, metric readouts, and status badges.
 """
 
 from typing import Any, Dict, List, Optional
@@ -26,6 +28,91 @@ def render_console_header(
         </div>
     </div>
     """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def render_system_masthead(
+    version: str = "v0.3.0",
+    build_label: str = "BEHAVIORAL WORKSTATION",
+) -> None:
+    """Render a prominent sidebar masthead with project branding and version badge.
+
+    This replaces the inline sidebar header HTML with a reusable component
+    using the system-masthead CSS classes.
+    """
+    html = f"""
+    <div style="padding: 12px 0 16px 0; border-bottom: 1px solid #1E232B; margin-bottom: 14px;">
+        <div class="system-masthead-title">
+            RESEARCH CONSOLE {version}
+        </div>
+        <div class="system-masthead-subtitle">
+            {build_label}
+        </div>
+        <div style="margin-top: 6px;">
+            <span class="system-masthead-badge">BUILD {version}</span>
+        </div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def render_metric_readout(
+    label: str,
+    value: str,
+    unit: str = "",
+    accent: str = "#E9EEF5",
+) -> None:
+    """Render a single instrument-style metric readout cell.
+
+    Args:
+        label: Uppercase metric label text.
+        value: Primary display value (rendered in monospace).
+        unit: Optional unit suffix (e.g. 'ms', 'WPM', '%').
+        accent: CSS color for the value text.
+    """
+    unit_html = f'<div class="metric-readout-unit">{unit}</div>' if unit else ""
+    html = f"""
+    <div class="metric-readout">
+        <div class="metric-readout-label">{label}</div>
+        <div class="metric-readout-value" style="color: {accent};">{value}</div>
+        {unit_html}
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def render_status_badge(
+    text: str,
+    status_type: str = "ready",
+) -> str:
+    """Return an inline HTML status badge with LED-style coloring.
+
+    Args:
+        text: Badge text (rendered uppercase).
+        status_type: One of 'ready', 'warning', 'critical', 'cyan'.
+
+    Returns:
+        HTML string for the badge (for embedding in other markup).
+    """
+    return f'<span class="status-badge {status_type}">{text}</span>'
+
+
+def render_section_divider(label: str = "") -> None:
+    """Render a horizontal section divider with an optional center label.
+
+    Args:
+        label: Optional label text centered on the divider line.
+    """
+    if label:
+        html = f"""
+        <div class="section-divider">
+            <div class="section-divider-line"></div>
+            <div class="section-divider-label">{label}</div>
+            <div class="section-divider-line"></div>
+        </div>
+        """
+    else:
+        html = '<div style="border-top: 1px solid #1E232B; margin: 14px 0;"></div>'
     st.markdown(html, unsafe_allow_html=True)
 
 

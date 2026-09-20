@@ -81,8 +81,8 @@ def validate_browser_event(
             )
         return None
 
-    # 2. Validate event_type
-    raw_type = str(event_dict.get("event_type", "")).strip().lower()
+    # 2. Validate event_type (support both 'event_type' and 'type')
+    raw_type = str(event_dict.get("event_type", event_dict.get("type", ""))).strip().lower()
     if raw_type in ("down", "keydown"):
         event_type = KeyEventType.KEY_DOWN.value
     elif raw_type in ("up", "keyup"):
@@ -99,56 +99,56 @@ def validate_browser_event(
     except (ValueError, TypeError):
         return None
 
-    # 4. Validate key token abstractness
-    raw_token = str(event_dict.get("key_token", "k_other")).strip()
-    # Reject raw single characters that leaked without prefix
-    if len(raw_token) == 1 or not ABSTRACT_TOKEN_PATTERN.match(raw_token):
-        # Disallow raw char leaks
-        logger.warning("PRIVACY_EVENT_REJECTED: Key token appears to be raw character.")
+    # 4. Validate and sanitize key token
+    token = str(event_dict.get("key_token", "k_other")).strip()
+
+    # Reject raw characters that are not abstract tokens
+    if len(token) == 1:
         if strict_raise:
-            raise PrivacyViolationError("Key token must be an abstract category matching 'k_<token>'")
+            raise PrivacyViolationError(f"Privacy filter violation: Raw character detected: '{token}'")
         return None
 
-    # 5. Extract safe boolean flags
-    is_backspace = bool(event_dict.get("is_backspace", False) or "backspace" in raw_token.lower())
-    is_enter = bool(event_dict.get("is_enter", False) or "enter" in raw_token.lower())
-    is_space = bool(event_dict.get("is_space", False) or "space" in raw_token.lower())
+    if not ABSTRACT_TOKEN_PATTERN.match(token):
+        if token.lower() in ("backspace", "enter", "space", "tab"):
+            token = f"k_{token.lower()}"
+        else:
+            token = "k_other"
+
+    # 5. Extract boolean modifier flags
+    is_backspace = bool(event_dict.get("is_backspace", token == "k_backspace"))
+    is_enter = bool(event_dict.get("is_enter", token == "k_enter"))
+    is_space = bool(event_dict.get("is_space", token == "k_space"))
 
     return RawBrowserEvent(
         event_type=event_type,
         timestamp_ms=timestamp_ms,
-        key_token=raw_token,
+        key_token=token,
         is_backspace=is_backspace,
         is_enter=is_enter,
         is_space=is_space,
     )
 
 
+# Alias for backwards compatibility
+sanitize_raw_event = validate_browser_event
+
+
 def sanitize_event_batch(
-    events: List[Dict[str, Any]],
+    raw_events: List[Dict[str, Any]],
     strict_raise: bool = False,
 ) -> Tuple[List[RawBrowserEvent], int]:
-    """Sanitize a batch of events received from the frontend component.
+    """Sanitize a batch of raw browser events, filtering out invalid or forbidden events."""
+    if not isinstance(raw_events, list):
+        return [], 0
 
-    Args:
-        events: List of raw browser event dictionaries.
-        strict_raise: If True, raises on any privacy violation.
-
-    Returns:
-        Tuple[List[RawBrowserEvent], int]: (sanitized_events, rejected_count).
-    """
-    sanitized: List[RawBrowserEvent] = []
+    clean_batch: List[RawBrowserEvent] = []
     rejected_count = 0
-
-    for ev in events:
-        clean_ev = validate_browser_event(ev, strict_raise=strict_raise)
-        if clean_ev is not None:
-            sanitized.append(clean_ev)
+    for ev in raw_events:
+        valid_ev = validate_browser_event(ev, strict_raise=strict_raise)
+        if valid_ev is not None:
+            clean_batch.append(valid_ev)
         else:
             rejected_count += 1
 
-    return sanitized, rejected_count
+    return clean_batch, rejected_count
 
-
-# Alias for canonical naming
-sanitize_raw_event = validate_browser_event

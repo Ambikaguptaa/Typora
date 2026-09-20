@@ -139,6 +139,10 @@ class LiveTypingSession:
         """Return a copy of currently buffered paired events."""
         return list(self._paired_events)
 
+    def get_active_duration_seconds(self) -> float:
+        """Return total active elapsed duration in seconds."""
+        return self.duration_seconds
+
     def get_summary(self) -> Dict[str, Any]:
         """Return a structured summary of the session."""
         return {

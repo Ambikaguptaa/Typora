@@ -295,11 +295,20 @@ class BehavioralEngine:
 
         # Build baseline profile using canonical baseline analysis
         history_df = pd.DataFrame(self.user_calibration_history)
+        candidate_cols = [
+            c for c in history_df.columns
+            if c not in ("user_id", "session_id", "session_type", "timestamp")
+        ]
         profile = build_user_baseline(
             history_df,
             user_id=self.user_id,
             min_sessions=min_required,
+            baseline_features=candidate_cols if candidate_cols else None,
         )
+        if profile and "features" in profile:
+            profile["means"] = {
+                k: v.get("mean", 0.0) for k, v in profile["features"].items() if isinstance(v, dict)
+            }
         msg = f"Personal baseline established from {completed} calibration sessions."
         return True, msg, completed, min_required, profile
 
@@ -505,12 +514,19 @@ class BehavioralEngine:
             disclaimer=EVALUATION_DISCLAIMER,
         )
 
-        # Persist report JSON
+        # Persist report JSON to local filesystem
         try:
             report_file = self.assessments_dir / f"assessment_{self.session.session_id}.json"
             final_res.save_json(report_file)
         except Exception as e:
             logger.warning(f"Failed to persist assessment JSON: {e}")
+
+        # Persist report to database for cloud deployment durability
+        try:
+            from database.database import save_assessment_record
+            save_assessment_record(final_res.to_dict())
+        except Exception as e:
+            logger.warning(f"Failed to persist assessment to database: {e}")
 
         self.last_result = final_res
         return final_res
