@@ -31,6 +31,7 @@ class RawBrowserEvent:
     is_backspace: bool = False
     is_enter: bool = False
     is_space: bool = False
+    event_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert event to dictionary representation."""
@@ -41,6 +42,7 @@ class RawBrowserEvent:
             "is_backspace": self.is_backspace,
             "is_enter": self.is_enter,
             "is_space": self.is_space,
+            "event_id": self.event_id,
         }
 
 

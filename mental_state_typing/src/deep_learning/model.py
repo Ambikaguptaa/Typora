@@ -4,11 +4,18 @@ Implements a standard, defensible recurrent neural network (stacked LSTM)
 tailored for temporal typing feature sequences (dwell times, flight times, pauses, variability).
 """
 
+from __future__ import annotations
+
 from dataclasses import asdict, dataclass, field
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
-import tensorflow as tf
+try:
+    import tensorflow as tf
+    HAS_TF = True
+except ImportError:
+    tf = None
+    HAS_TF = False
 
 
 @dataclass
@@ -99,6 +106,9 @@ def build_lstm_classifier(
         raise ValueError(f"sequence_length ({seq_len}) and num_features ({n_feats}) must be positive integers.")
     if n_cls < 2:
         raise ValueError(f"num_classes must be >= 2, got {n_cls}.")
+
+    if not HAS_TF or tf is None:
+        raise RuntimeError("TensorFlow is not installed or unavailable in current environment.")
 
     # Deterministic weight initialization
     tf.random.set_seed(cfg.random_seed)

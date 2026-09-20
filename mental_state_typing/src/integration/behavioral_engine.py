@@ -56,7 +56,7 @@ from src.live_typing.privacy_filter import (
     audit_payload_for_sensitive_keys,
     sanitize_event_batch,
 )
-from src.live_typing.session import LiveTypingSession, SessionStatus
+from src.live_typing.session import LiveTypingSession, SessionState, SessionStatus
 from src.live_typing.validation import validate_session_quality
 
 logger = logging.getLogger(__name__)
@@ -148,6 +148,7 @@ class BehavioralEngine:
     def pause_session(self) -> None:
         """Pause the current session."""
         self.session.pause()
+        self.state = PipelineState.PAUSED
 
     def resume_session(self) -> None:
         """Resume a paused session."""
@@ -158,7 +159,7 @@ class BehavioralEngine:
         """Completely reset session state, buffers, and indicators."""
         self.session.reset()
         self.feature_buffer.clear()
-        self.state = PipelineState.IDLE
+        self.state = PipelineState.READY
         self.last_result = None
         return self.session.session_id
 
@@ -315,218 +316,330 @@ class BehavioralEngine:
     def stop_session(self) -> BehavioralAssessmentResult:
         """Stop typing session, execute full intelligence pipeline, and produce assessment result.
 
+        Transitions: CAPTURING/PAUSED -> STOPPING -> VALIDATING -> COMPLETED (or ERROR on failure).
+
         Returns:
             BehavioralAssessmentResult: Complete structured assessment report.
         """
-        self.session.stop()
+        import time as _time
         ts = datetime.now(timezone.utc).isoformat()
 
-        # 1. Technical Data-Quality Verification
-        is_quality_valid, quality_verdict, quality_details = validate_session_quality(self.session)
-        quality_res = DataQualityResult(
-            is_valid=is_quality_valid,
-            verdict="PASS" if is_quality_valid else "FAIL",
-            reasons=quality_details.get("reasons", []),
-            metrics=quality_details.get("metrics", {}),
-        )
+        # STEP 5 COMPLIANCE: Intermediate state STOPPING before pipeline runs
+        # Validate we are in a state that allows STOP (stop validity check)
+        if self.session.state not in (SessionState.CAPTURING, SessionState.PAUSED):
+            raise ValueError(
+                f"Cannot STOP session from state: {self.session.state.value}"
+            )
 
-        telemetry_dict = self.feature_buffer.extract_telemetry()
-        feature_summary = FeatureSummary(**telemetry_dict)
+        # First: close timing (emulate stop() without setting COMPLETED yet)
+        now_ts = _time.time()
+        if self.session.state == SessionState.PAUSED and self.session._pause_time is not None:
+            self.session._total_paused_duration += now_ts - self.session._pause_time
+            self.session._pause_time = None
+        self.session.end_time = now_ts
 
-        # If data quality gate fails: stop inference, report QUALITY_CHECK_FAILED
-        if not is_quality_valid:
-            self.state = PipelineState.QUALITY_CHECK_FAILED
-            b_ready, b_msg, b_count, b_req, _ = self.check_baseline_readiness()
-            m_ready, m_reason, _ = self.check_model_readiness()
+        self.session.transition_to(SessionState.STOPPING)
+        self.state = PipelineState.STOPPING
 
-            res = BehavioralAssessmentResult(
+        res: BehavioralAssessmentResult
+
+        try:
+            # 1. Technical Data-Quality Verification (still in STOPPING phase)
+            is_quality_valid, quality_verdict, quality_details = validate_session_quality(self.session)
+            quality_res = DataQualityResult(
+                is_valid=is_quality_valid,
+                verdict="PASS" if is_quality_valid else "FAIL",
+                reasons=quality_details.get("reasons", []),
+                metrics=quality_details.get("metrics", {}),
+            )
+
+            telemetry_dict = self.feature_buffer.extract_telemetry()
+            feature_summary = FeatureSummary(**telemetry_dict)
+
+            # STEP 5 COMPLIANCE: Transition to VALIDATING after quality check
+            self.session.transition_to(SessionState.VALIDATING)
+            self.state = PipelineState.VALIDATING
+
+            # If data quality gate fails: stop inference, report QUALITY_CHECK_FAILED
+            if not is_quality_valid:
+                self.state = PipelineState.QUALITY_CHECK_FAILED
+                b_ready, b_msg, b_count, b_req, _ = self.check_baseline_readiness()
+                m_ready, m_reason, _ = self.check_model_readiness()
+
+                res = BehavioralAssessmentResult(
+                    session_id=self.session.session_id,
+                    user_id=self.user_id,
+                    session_type=self.session_type.value,
+                    timestamp=ts,
+                    pipeline_status=self.state.value,
+                    data_quality=quality_res,
+                    feature_summary=feature_summary,
+                    baseline_result=BaselineResult(
+                        status="READY" if b_ready else "NOT_READY",
+                        session_count=b_count,
+                        min_required_sessions=b_req,
+                        message=b_msg,
+                    ),
+                    model_result=ModelResult(
+                        status="MODEL_READY" if m_ready else "MODEL_NOT_READY",
+                        reason=m_reason,
+                    ),
+                    assessment_result=None,
+                    warnings=["Session contains insufficient micro-timing data for behavioral assessment."],
+                )
+                # Transition to COMPLETED as this is terminal state
+                self.session.transition_to(SessionState.COMPLETED)
+                self.state = PipelineState.COMPLETED
+                self.last_result = res
+                return res
+
+            self.state = PipelineState.FEATURES_READY
+
+            # 2. Canonical Sequence Windows Generation (N, 30, 6)
+            X_seq, meta_seq = self.feature_buffer.generate_sequence_windows(
+                sequence_length=self.sequence_length,
+                sequence_stride=self.sequence_stride,
+            )
+            quality_res.metrics["sequence_windows_count"] = len(X_seq)
+
+            # 3. Session Feature Table Construction
+            df_events = self.feature_buffer.to_dataframe(
+                user_id=self.user_id,
                 session_id=self.session.session_id,
+            )
+            session_features_df, _ = build_feature_table(
+                df_events,
+                user_col="user_id",
+                session_col="session_id",
+                timestamp_col="press_time",
+                pause_threshold_ms=self.pause_threshold_ms,
+            )
+            current_session_features = (
+                session_features_df.iloc[0].to_dict() if not session_features_df.empty else {}
+            )
+            if current_session_features:
+                current_session_features["session_id"] = self.session.session_id
+                current_session_features["user_id"] = self.user_id
+
+            # 4. Personal Baseline Branch
+            # If CALIBRATION session, store in history
+            if self.session_type == SessionType.CALIBRATION and current_session_features:
+                self.user_calibration_history.append(current_session_features)
+                self._save_user_history()
+
+            b_ready, b_msg, b_count, b_req, b_profile = self.check_baseline_readiness()
+            baseline_res = BaselineResult(
+                status="READY" if b_ready else "NOT_READY",
+                session_count=b_count,
+                min_required_sessions=b_req,
+                message=b_msg,
+            )
+
+            baseline_deviation_dict: Optional[Dict[str, Any]] = None
+            if b_ready and b_profile and current_session_features:
+                baseline_deviation_dict = calculate_baseline_deviation(
+                    current_session=current_session_features,
+                    user_baseline=b_profile,
+                )
+                baseline_res.typing_deviation_index = baseline_deviation_dict.get("typing_deviation_index")
+                baseline_res.deviations = baseline_deviation_dict.get("features")
+                baseline_res.message = "Personal baseline comparison complete."
+
+            # 5. Model Inference Branch (Honest Gating)
+            m_ready, m_reason, m_details = self.check_model_readiness()
+            model_res: ModelResult
+
+            if not m_ready:
+                model_res = ModelResult(
+                    status="MODEL_NOT_READY",
+                    reason=m_reason,
+                )
+            else:
+                # Model is ready (or test mock engine is active)
+                try:
+                    if self.mock_model_engine is not None and getattr(self.mock_model_engine, "is_mock", False):
+                        # Test mock prediction
+                        pred_res = self.mock_model_engine.predict_sequences(X_seq)
+                        model_res = ModelResult(
+                            status="MODEL_READY",
+                            reason="Test mock prediction successful.",
+                            predicted_class=pred_res["predicted_class"],
+                            class_probabilities=pred_res["class_probabilities"],
+                            top_probability=pred_res.get("top_probability"),
+                            second_probability=pred_res.get("second_probability"),
+                            probability_margin=pred_res.get("probability_margin"),
+                            normalized_entropy=pred_res.get("normalized_entropy"),
+                            reliability=pred_res.get("reliability"),
+                            is_mock=True,
+                        )
+                    else:
+                        # Verified production model inference
+                        import tensorflow as tf
+                        scaler, feature_cols = load_scaler(self.models_dir / "feature_scaler.pkl")
+                        label_map = load_label_mapping(self.models_dir / "label_mapping.json")
+                        id_to_label = {v: k for k, v in label_map.items()}
+
+                        # Transform sequence with fitted scaler without leakage
+                        X_scaled = transform_sequence(scaler, X_seq)
+                        model = tf.keras.models.load_model(str(self.models_dir / "lstm_model.keras"))
+                        batch_preds = model.predict(X_scaled, verbose=0)
+                        mean_probs = np.mean(batch_preds, axis=0)
+
+                        class_probs = {id_to_label[i]: float(p) for i, p in enumerate(mean_probs)}
+                        interp = interpret_model_prediction(class_probs)
+
+                        model_res = ModelResult(
+                            status="MODEL_READY",
+                            reason="Production sequence inference complete.",
+                            predicted_class=interp["predicted_class"],
+                            class_probabilities=class_probs,
+                            top_probability=interp.get("top_probability"),
+                            second_probability=interp.get("second_probability"),
+                            probability_margin=interp.get("probability_margin"),
+                            normalized_entropy=interp.get("normalized_entropy"),
+                            reliability=interp.get("reliability"),
+                            is_mock=False,
+                        )
+                except Exception as e:
+                    logger.error(f"Inference failure: {e}")
+                    model_res = ModelResult(
+                        status="MODEL_NOT_READY",
+                        reason=f"Model inference failed: {e}",
+                    )
+
+            # 6. Behavioral Assessment Layer Synthesis
+            asmt_input = AssessmentInput(
+                user_id=self.user_id,
+                session_id=self.session.session_id,
+                keystroke_count=self.feature_buffer.event_count,
+                predicted_class=model_res.predicted_class,
+                class_probabilities=model_res.class_probabilities,
+                baseline_deviation_result=baseline_deviation_dict,
+                sequence=X_seq if len(X_seq) > 0 else None,
+                feature_names=CANONICAL_SEQUENCE_FEATURES,
+                model_available=(model_res.status == "MODEL_READY"),
+                is_mock=model_res.is_mock,
+                timestamp=ts,
+            )
+            asmt_doc = generate_behavioral_assessment(
+                input_data=asmt_input,
+                expected_features=CANONICAL_SEQUENCE_FEATURES,
+                expected_sequence_length=self.sequence_length,
+            )
+
+            # 7. Final Assessment Result Assembly — STEP 5: Transition to COMPLETED
+            self.session.transition_to(SessionState.COMPLETED)
+            self.state = PipelineState.COMPLETED
+
+            final_res = BehavioralAssessmentResult(
+                session_id=self.session.session_id,
+                user_id=self.user_id,
                 session_type=self.session_type.value,
                 timestamp=ts,
                 pipeline_status=self.state.value,
                 data_quality=quality_res,
                 feature_summary=feature_summary,
+                baseline_result=baseline_res,
+                model_result=model_res,
+                assessment_result=asmt_doc,
+                privacy_status="ENFORCED",
+                warnings=asmt_doc.get("warnings", []),
+                disclaimer=EVALUATION_DISCLAIMER,
+            )
+
+            # Persist report JSON to local filesystem
+            try:
+                report_file = self.assessments_dir / f"assessment_{self.session.session_id}.json"
+                final_res.save_json(report_file)
+            except Exception as e:
+                logger.warning(f"Failed to persist assessment JSON: {e}")
+
+            # Persist report and metrics to database for durability
+            try:
+                from database.database import get_db_cursor, save_assessment_record, save_session_record
+            except Exception as e:
+                logger.warning(f"Database helpers unavailable: {e}")
+                save_session_record = save_assessment_record = get_db_cursor = None
+
+            if save_session_record is not None:
+                try:
+                    save_session_record(
+                        session_id=self.session.session_id,
+                        user_id=self.user_id,
+                        session_type=self.session_type.value,
+                        sample_count=self.feature_buffer.event_count,
+                        status="completed",
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to save session record: {e}")
+
+            if save_assessment_record is not None:
+                try:
+                    save_assessment_record(final_res.to_dict())
+                except Exception as e:
+                    logger.warning(f"Failed to save assessment record: {e}")
+
+            # Also persist typing_metrics row if valid telemetry exists
+            if feature_summary and feature_summary.event_count > 0 and get_db_cursor is not None:
+                try:
+                    with get_db_cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO typing_metrics (session_id, mean_hold_time_ms, mean_flight_time_ms, pause_rate, estimated_strain_score)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                self.session.session_id,
+                                feature_summary.mean_dwell_ms,
+                                feature_summary.mean_flight_ms,
+                                feature_summary.pause_rate,
+                                baseline_res.typing_deviation_index or 0.0,
+                            ),
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to persist typing metrics: {e}")
+
+            self.last_result = final_res
+            return final_res
+
+        except Exception as e:
+            # STEP 5 COMPLIANCE: Any unexpected pipeline error -> ERROR state
+            logger.exception(f"Pipeline execution failed in stop_session: {e}")
+            self.session.transition_to(SessionState.ERROR)
+            self.state = PipelineState.ERROR
+
+            error_res = BehavioralAssessmentResult(
+                session_id=self.session.session_id,
+                user_id=self.user_id,
+                session_type=self.session_type.value,
+                timestamp=ts,
+                pipeline_status="ERROR",
+                data_quality=DataQualityResult(
+                    is_valid=False,
+                    verdict="FAIL",
+                    reasons=[f"Pipeline execution error: {e}"],
+                    metrics={},
+                ),
+                feature_summary=FeatureSummary(
+                    event_count=self.feature_buffer.event_count,
+                    mean_dwell_ms=0.0,
+                    mean_flight_ms=0.0,
+                    pause_rate=0.0,
+                    estimated_wpm=0.0,
+                    estimated_strain_score=0.0,
+                ),
                 baseline_result=BaselineResult(
-                    status="READY" if b_ready else "NOT_READY",
-                    session_count=b_count,
-                    min_required_sessions=b_req,
-                    message=b_msg,
+                    status="NOT_READY",
+                    session_count=0,
+                    min_required_sessions=self.min_calibration_sessions,
+                    message="Pipeline failed before baseline assessment.",
                 ),
                 model_result=ModelResult(
-                    status="MODEL_READY" if m_ready else "MODEL_NOT_READY",
-                    reason=m_reason,
+                    status="MODEL_NOT_READY",
+                    reason="Pipeline failed before model inference.",
                 ),
                 assessment_result=None,
-                warnings=["Session contains insufficient micro-timing data for behavioral assessment."],
+                warnings=[f"Pipeline error: {type(e).__name__}: {e}"],
             )
-            self.last_result = res
-            return res
-
-        self.state = PipelineState.FEATURES_READY
-
-        # 2. Canonical Sequence Windows Generation (N, 30, 6)
-        X_seq, meta_seq = self.feature_buffer.generate_sequence_windows(
-            sequence_length=self.sequence_length,
-            sequence_stride=self.sequence_stride,
-        )
-        quality_res.metrics["sequence_windows_count"] = len(X_seq)
-
-        # 3. Session Feature Table Construction
-        df_events = self.feature_buffer.to_dataframe(
-            user_id=self.user_id,
-            session_id=self.session.session_id,
-        )
-        session_features_df, _ = build_feature_table(
-            df_events,
-            user_col="user_id",
-            session_col="session_id",
-            timestamp_col="press_time",
-            pause_threshold_ms=self.pause_threshold_ms,
-        )
-        current_session_features = (
-            session_features_df.iloc[0].to_dict() if not session_features_df.empty else {}
-        )
-        if current_session_features:
-            current_session_features["session_id"] = self.session.session_id
-            current_session_features["user_id"] = self.user_id
-
-        # 4. Personal Baseline Branch
-        # If CALIBRATION session, store in history
-        if self.session_type == SessionType.CALIBRATION and current_session_features:
-            self.user_calibration_history.append(current_session_features)
-            self._save_user_history()
-
-        b_ready, b_msg, b_count, b_req, b_profile = self.check_baseline_readiness()
-        baseline_res = BaselineResult(
-            status="READY" if b_ready else "NOT_READY",
-            session_count=b_count,
-            min_required_sessions=b_req,
-            message=b_msg,
-        )
-
-        baseline_deviation_dict: Optional[Dict[str, Any]] = None
-        if b_ready and b_profile and current_session_features:
-            baseline_deviation_dict = calculate_baseline_deviation(
-                current_session=current_session_features,
-                user_baseline=b_profile,
-            )
-            baseline_res.typing_deviation_index = baseline_deviation_dict.get("typing_deviation_index")
-            baseline_res.deviations = baseline_deviation_dict.get("features")
-            baseline_res.message = "Personal baseline comparison complete."
-
-        # 5. Model Inference Branch (Honest Gating)
-        m_ready, m_reason, m_details = self.check_model_readiness()
-        model_res: ModelResult
-
-        if not m_ready:
-            model_res = ModelResult(
-                status="MODEL_NOT_READY",
-                reason=m_reason,
-            )
-        else:
-            # Model is ready (or test mock engine is active)
-            try:
-                if self.mock_model_engine is not None and getattr(self.mock_model_engine, "is_mock", False):
-                    # Test mock prediction
-                    pred_res = self.mock_model_engine.predict_sequences(X_seq)
-                    model_res = ModelResult(
-                        status="MODEL_READY",
-                        reason="Test mock prediction successful.",
-                        predicted_class=pred_res["predicted_class"],
-                        class_probabilities=pred_res["class_probabilities"],
-                        top_probability=pred_res.get("top_probability"),
-                        second_probability=pred_res.get("second_probability"),
-                        probability_margin=pred_res.get("probability_margin"),
-                        normalized_entropy=pred_res.get("normalized_entropy"),
-                        reliability=pred_res.get("reliability"),
-                        is_mock=True,
-                    )
-                else:
-                    # Verified production model inference
-                    import tensorflow as tf
-                    scaler, feature_cols = load_scaler(self.models_dir / "feature_scaler.pkl")
-                    label_map = load_label_mapping(self.models_dir / "label_mapping.json")
-                    id_to_label = {v: k for k, v in label_map.items()}
-
-                    # Transform sequence with fitted scaler without leakage
-                    X_scaled = transform_sequence(scaler, X_seq)
-                    model = tf.keras.models.load_model(str(self.models_dir / "lstm_model.keras"))
-                    batch_preds = model.predict(X_scaled, verbose=0)
-                    mean_probs = np.mean(batch_preds, axis=0)
-
-                    class_probs = {id_to_label[i]: float(p) for i, p in enumerate(mean_probs)}
-                    interp = interpret_model_prediction(class_probs)
-
-                    model_res = ModelResult(
-                        status="MODEL_READY",
-                        reason="Production sequence inference complete.",
-                        predicted_class=interp["predicted_class"],
-                        class_probabilities=class_probs,
-                        top_probability=interp.get("top_probability"),
-                        second_probability=interp.get("second_probability"),
-                        probability_margin=interp.get("probability_margin"),
-                        normalized_entropy=interp.get("normalized_entropy"),
-                        reliability=interp.get("reliability"),
-                        is_mock=False,
-                    )
-            except Exception as e:
-                logger.error(f"Inference failure: {e}")
-                model_res = ModelResult(
-                    status="MODEL_NOT_READY",
-                    reason=f"Model inference failed: {e}",
-                )
-
-        # 6. Behavioral Assessment Layer Synthesis
-        asmt_input = AssessmentInput(
-            user_id=self.user_id,
-            session_id=self.session.session_id,
-            keystroke_count=self.feature_buffer.event_count,
-            predicted_class=model_res.predicted_class,
-            class_probabilities=model_res.class_probabilities,
-            baseline_deviation_result=baseline_deviation_dict,
-            sequence=X_seq if len(X_seq) > 0 else None,
-            feature_names=CANONICAL_SEQUENCE_FEATURES,
-            model_available=(model_res.status == "MODEL_READY"),
-            is_mock=model_res.is_mock,
-            timestamp=ts,
-        )
-        asmt_doc = generate_behavioral_assessment(
-            input_data=asmt_input,
-            expected_features=CANONICAL_SEQUENCE_FEATURES,
-            expected_sequence_length=self.sequence_length,
-        )
-
-        # 7. Final Assessment Result Assembly
-        self.state = PipelineState.ASSESSMENT_COMPLETE
-
-        final_res = BehavioralAssessmentResult(
-            session_id=self.session.session_id,
-            session_type=self.session_type.value,
-            timestamp=ts,
-            pipeline_status=self.state.value,
-            data_quality=quality_res,
-            feature_summary=feature_summary,
-            baseline_result=baseline_res,
-            model_result=model_res,
-            assessment_result=asmt_doc,
-            privacy_status="ENFORCED",
-            warnings=asmt_doc.get("warnings", []),
-            disclaimer=EVALUATION_DISCLAIMER,
-        )
-
-        # Persist report JSON to local filesystem
-        try:
-            report_file = self.assessments_dir / f"assessment_{self.session.session_id}.json"
-            final_res.save_json(report_file)
-        except Exception as e:
-            logger.warning(f"Failed to persist assessment JSON: {e}")
-
-        # Persist report to database for cloud deployment durability
-        try:
-            from database.database import save_assessment_record
-            save_assessment_record(final_res.to_dict())
-        except Exception as e:
-            logger.warning(f"Failed to persist assessment to database: {e}")
-
-        self.last_result = final_res
-        return final_res
+            self.last_result = error_res
+            return error_res

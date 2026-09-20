@@ -8,7 +8,12 @@ keystroke sequence inputs. Supports inference on new, previously unseen users.
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 import numpy as np
-import tensorflow as tf
+try:
+    import tensorflow as tf
+    HAS_TF = True
+except ImportError:
+    tf = None
+    HAS_TF = False
 
 from src.config.settings import settings
 from src.deep_learning.data_split import load_scaler, transform_sequence
@@ -43,6 +48,9 @@ def predict_sequence(
         ValueError: If the sequence dimension or features do not match model expectations.
     """
     m_dir = Path(models_dir) if models_dir else settings.models_path
+
+    if not HAS_TF or tf is None:
+        raise RuntimeError("TensorFlow is not installed or unavailable in current environment.")
 
     model_path = m_dir / "lstm_model.keras"
     scaler_path = m_dir / "feature_scaler.pkl"

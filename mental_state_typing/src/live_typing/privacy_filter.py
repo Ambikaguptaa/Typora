@@ -91,10 +91,15 @@ def validate_browser_event(
         logger.warning("PRIVACY_EVENT_REJECTED: Unrecognized event_type.")
         return None
 
-    # 3. Validate timestamp
+    # 3. Validate timestamp (strictly required)
+    if "timestamp_ms" not in event_dict and "timestamp" not in event_dict:
+        return None
+
     try:
-        timestamp_ms = float(event_dict.get("timestamp_ms", event_dict.get("timestamp", 0.0)))
-        if timestamp_ms < 0 or not (timestamp_ms == timestamp_ms):  # NaN check
+        raw_ts = event_dict.get("timestamp_ms", event_dict.get("timestamp"))
+        timestamp_ms = float(raw_ts)
+        import math
+        if timestamp_ms < 0 or not math.isfinite(timestamp_ms):
             return None
     except (ValueError, TypeError):
         return None
@@ -119,6 +124,10 @@ def validate_browser_event(
     is_enter = bool(event_dict.get("is_enter", token == "k_enter"))
     is_space = bool(event_dict.get("is_space", token == "k_space"))
 
+    # 6. Extract optional event_id for deduplication
+    event_id_val = event_dict.get("event_id")
+    event_id = str(event_id_val) if event_id_val is not None else None
+
     return RawBrowserEvent(
         event_type=event_type,
         timestamp_ms=timestamp_ms,
@@ -126,6 +135,7 @@ def validate_browser_event(
         is_backspace=is_backspace,
         is_enter=is_enter,
         is_space=is_space,
+        event_id=event_id,
     )
 
 

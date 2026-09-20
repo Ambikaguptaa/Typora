@@ -63,13 +63,29 @@ from src.data_engineering.baseline import (
     save_user_baselines,
     update_user_baseline,
 )
-from src.data_engineering.pipeline import run_feature_pipeline
+try:
+    from src.data_engineering.pipeline import run_feature_pipeline
+except ImportError:
+    def run_feature_pipeline(*args, **kwargs):
+        raise ImportError("Pipeline requires full data_engineering stack. Install all dependencies.")
+
 from src.data_engineering.dataset_acquisition import DatasetStatus, get_dataset_status
-from src.data_engineering.real_dataset_validator import validate_real_dataset
-from src.data_engineering.adapters.mobilestress_adapter import (
-    MobileStressAdapter,
-    adapt_mobilestress_dataset,
-)
+try:
+    from src.data_engineering.real_dataset_validator import validate_real_dataset
+except ImportError:
+    def validate_real_dataset(*args, **kwargs):
+        return False, "Real dataset validation unavailable (missing privacy/crypto modules)", {}
+
+try:
+    from src.data_engineering.adapters.mobilestress_adapter import (
+        MobileStressAdapter,
+        adapt_mobilestress_dataset,
+    )
+except ImportError:
+    MobileStressAdapter = None
+    def adapt_mobilestress_dataset(*args, **kwargs):
+        raise ImportError("MobileStress adapter unavailable.")
+
 from src.data_engineering.leakage_audit import assert_no_data_leakage, audit_data_leakage
 
 __all__ = [

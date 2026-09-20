@@ -10,7 +10,13 @@ import json
 from pathlib import Path
 from typing import Any, Optional, Union
 
-from cryptography.fernet import Fernet, InvalidToken
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+    _CRYPTOGRAPHY_AVAILABLE = True
+except ImportError:
+    _CRYPTOGRAPHY_AVAILABLE = False
+    Fernet = None
+    InvalidToken = Exception
 
 from src.config.settings import settings
 
@@ -20,16 +26,26 @@ class DecryptionError(Exception):
     pass
 
 
+def _ensure_cryptography() -> None:
+    """Raise ImportError if cryptography package is not installed."""
+    if not _CRYPTOGRAPHY_AVAILABLE:
+        raise ImportError(
+            "The 'cryptography' package is required for encryption operations. "
+            "Install it with: pip install cryptography"
+        )
+
+
 def generate_encryption_key() -> str:
     """Generate a new url-safe base64-encoded 32-byte Fernet key.
 
     Returns:
         str: Fernet key as a string.
     """
+    _ensure_cryptography()
     return Fernet.generate_key().decode("utf-8")
 
 
-def get_fernet(key: Optional[Union[str, bytes]] = None) -> Fernet:
+def get_fernet(key: Optional[Union[str, bytes]] = None):
     """Instantiate a Fernet cryptographic engine.
 
     Args:
@@ -41,6 +57,7 @@ def get_fernet(key: Optional[Union[str, bytes]] = None) -> Fernet:
     Raises:
         ValueError: If no key is provided and none is configured in settings.
     """
+    _ensure_cryptography()
     effective_key = key if key is not None else settings.encryption_key
 
     if not effective_key:

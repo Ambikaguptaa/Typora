@@ -110,6 +110,7 @@ class BehavioralAssessmentResult:
     feature_summary: FeatureSummary
     baseline_result: BaselineResult
     model_result: ModelResult
+    user_id: str = "participant_local"
     assessment_result: Optional[Dict[str, Any]] = None
     privacy_status: str = "ENFORCED"
     warnings: List[str] = field(default_factory=list)
@@ -153,6 +154,7 @@ class BehavioralAssessmentResult:
             feature_summary=FeatureSummary(**feat_data) if feat_data else FeatureSummary(),
             baseline_result=BaselineResult(**base_data) if base_data else BaselineResult(status="NOT_READY"),
             model_result=ModelResult(**model_data) if model_data else ModelResult(status="MODEL_NOT_READY"),
+            user_id=data.get("user_id", "participant_local"),
             assessment_result=data.get("assessment_result"),
             privacy_status=data.get("privacy_status", "ENFORCED"),
             warnings=data.get("warnings", []),

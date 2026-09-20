@@ -115,33 +115,141 @@
       color: #35D6FF;
       font-weight: 600;
     }
+    .inactive-overlay {
+      display: none;
+      position: relative;
+      background: linear-gradient(135deg, rgba(139, 124, 255, 0.08), rgba(53, 214, 255, 0.04));
+      border: 2px dashed rgba(139, 124, 255, 0.4);
+      border-radius: 8px;
+      padding: 24px 18px;
+      margin-bottom: 12px;
+      text-align: center;
+      user-select: none;
+    }
+    .inactive-overlay.show {
+      display: block;
+    }
+    .inactive-overlay .overlay-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: #8B7CFF;
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .inactive-overlay .overlay-body {
+      font-size: 13px;
+      color: #9BA3AF;
+      line-height: 1.6;
+    }
+    .inactive-overlay .overlay-body strong {
+      color: #E6EDF3;
+    }
+    .active-banner {
+      display: none;
+      background: linear-gradient(135deg, rgba(53, 214, 255, 0.10), rgba(69, 224, 168, 0.08));
+      border-left: 3px solid #35D6FF;
+      border-radius: 4px;
+      padding: 10px 14px;
+      margin-bottom: 12px;
+    }
+    .active-banner.show {
+      display: block;
+    }
+    .active-banner .banner-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: #35D6FF;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 6px;
+    }
+    .active-banner .banner-subtitle {
+      font-size: 14px;
+      font-weight: 600;
+      color: #45E0A8;
+    }
+    .telemetry-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .telemetry-card {
+      background: #111318;
+      border: 1px solid #1F242D;
+      border-radius: 6px;
+      padding: 8px 10px;
+      text-align: center;
+    }
+    .telemetry-card .tc-label {
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #6E7681;
+      margin-bottom: 4px;
+      font-weight: 600;
+    }
+    .telemetry-card .tc-value {
+      font-size: 17px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      color: #E6EDF3;
+    }
+    .telemetry-card .tc-value.cyan { color: #35D6FF; }
+    .telemetry-card .tc-value.green { color: #45E0A8; }
+    .telemetry-card .tc-value.violet { color: #8B7CFF; }
+    .status-badge.inactive {
+      background: rgba(139, 124, 255, 0.1);
+      color: #8B7CFF;
+      border-color: rgba(139, 124, 255, 0.3);
+    }
+    .status-badge.inactive .status-dot {
+      background: #8B7CFF;
+      box-shadow: 0 0 0 rgba(139, 124, 255, 0);
+    }
   </style>
 </head>
 <body>
   <div class="typing-container">
     <div class="header-bar">
-      <div class="status-badge" id="statusBadge">
+      <div class="status-badge inactive" id="statusBadge">
         <span class="status-dot"></span>
-        <span id="statusText">Active Capture Stream</span>
+        <span id="statusText">Capture Not Active</span>
       </div>
       <div class="privacy-tag">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
           <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
         </svg>
-        <span>Zero-Text Privacy Active</span>
+        <span>Zero-Text Policy</span>
       </div>
     </div>
 
+    <div class="inactive-overlay show" id="inactiveOverlay">
+      <div class="overlay-title">Capture Not Active</div>
+      <div class="overlay-body">
+        Click <strong>START SESSION</strong> to begin.<br>
+        The typing canvas will become active once the session starts.<br><br>
+        All keystrokes are anonymized into timing tokens — <strong>no raw text is ever stored or transmitted</strong>.
+      </div>
+    </div>
+
+    <div class="active-banner" id="activeBanner">
+      <div class="banner-title">Focused Typing Canvas</div>
+      <div class="banner-subtitle" id="activeSubtitle">CLICK HERE AND TYPE — Session ACTIVE</div>
+    </div>
+
     <div class="prompt-box">
-      <div class="prompt-title">Typing Task Prompt</div>
-      <div id="promptContent">The rapid advance of technology requires continuous adaptation and cognitive focus. Clear thinking and steady execution produce reliable results under observation.</div>
+      <div class="prompt-title">Typing Prompt</div>
+      <div id="promptContent">Type naturally as if composing a short paragraph. Your timing cadence is what is being analyzed, not the content of your words.</div>
     </div>
 
     <textarea
       id="typingArea"
       class="typing-input"
-      placeholder="Click here and begin typing naturally according to the prompt above..."
+      disabled
+      placeholder="Click START SESSION above, then click here and begin typing naturally..."
       autocomplete="off"
       autocorrect="off"
       autocapitalize="off"
@@ -149,8 +257,23 @@
     ></textarea>
 
     <div class="telemetry-row">
-      <div>Captured Events: <span id="eventCounter" class="count-indicator">0</span></div>
-      <div id="captureHint">Keystrokes are converted strictly into anonymized timing tokens</div>
+      <div>Events Captured: <span id="eventCounter" class="count-indicator">0</span></div>
+      <div id="captureHint">Anonymized timing tokens only</div>
+    </div>
+
+    <div class="telemetry-grid">
+      <div class="telemetry-card">
+        <div class="tc-label">Events</div>
+        <div class="tc-value cyan" id="tmEvents">0</div>
+      </div>
+      <div class="telemetry-card">
+        <div class="tc-label">Feature Rows</div>
+        <div class="tc-value green" id="tmFeatures">0</div>
+      </div>
+      <div class="telemetry-card">
+        <div class="tc-label">Windows</div>
+        <div class="tc-value violet" id="tmWindows">0</div>
+      </div>
     </div>
   </div>
 
@@ -159,7 +282,8 @@
     // Neither event.key nor textarea.value is ever stored or transmitted.
     // Events strictly record high-resolution timestamps and categorical tokens.
 
-    let isSessionActive = true;
+    let isSessionActive = false;
+    let sessionPaused = false;
     let eventBuffer = [];
     let totalCaptured = 0;
     let flushTimer = null;
@@ -167,6 +291,15 @@
     const textarea = document.getElementById('typingArea');
     const counterSpan = document.getElementById('eventCounter');
     const promptSpan = document.getElementById('promptContent');
+    const inactiveOverlay = document.getElementById('inactiveOverlay');
+    const activeBanner = document.getElementById('activeBanner');
+    const statusBadge = document.getElementById('statusBadge');
+    const statusText = document.getElementById('statusText');
+    const activeSubtitle = document.getElementById('activeSubtitle');
+    const tmEvents = document.getElementById('tmEvents');
+    const tmFeatures = document.getElementById('tmFeatures');
+    const tmWindows = document.getElementById('tmWindows');
+    const captureHint = document.getElementById('captureHint');
 
     function sendToStreamlit(value) {
       window.parent.postMessage({
@@ -181,6 +314,41 @@
         type: "streamlit:setFrameHeight",
         height: height
       }, "*");
+    }
+
+    function applyVisualState() {
+      if (isSessionActive && !sessionPaused) {
+        // ACTIVE / CAPTURING
+        inactiveOverlay.classList.remove('show');
+        activeBanner.classList.add('show');
+        statusBadge.classList.remove('inactive');
+        statusText.textContent = "Active Capture Stream";
+        activeSubtitle.textContent = "CLICK HERE AND TYPE — Session ACTIVE";
+        captureHint.textContent = "Anonymized timing tokens only";
+      } else if (isSessionActive && sessionPaused) {
+        // PAUSED
+        inactiveOverlay.classList.remove('show');
+        activeBanner.classList.add('show');
+        statusBadge.classList.remove('inactive');
+        statusBadge.style.opacity = "0.6";
+        statusText.textContent = "Capture Paused";
+        activeSubtitle.textContent = "Session PAUSED — Click RESUME to continue typing";
+        captureHint.textContent = "Capture paused — no new events will be recorded";
+      } else {
+        // NOT STARTED / RESET
+        inactiveOverlay.classList.add('show');
+        activeBanner.classList.remove('show');
+        statusBadge.classList.add('inactive');
+        statusBadge.style.opacity = "1.0";
+        statusText.textContent = "Capture Not Active";
+        captureHint.textContent = "Click START SESSION to enable typing";
+      }
+    }
+
+    function updateTelemetry(events, features, windows) {
+      if (tmEvents) tmEvents.textContent = String(events || 0);
+      if (tmFeatures) tmFeatures.textContent = String(features || 0);
+      if (tmWindows) tmWindows.textContent = String(windows || 0);
     }
 
     function classifyKey(event) {
@@ -209,10 +377,11 @@
     }
 
     function queueEvent(eventType, event) {
-      if (!isSessionActive) return;
+      if (!isSessionActive || sessionPaused) return;
 
       const classification = classifyKey(event);
       const timingRecord = {
+        event_id: `ev_${Date.now()}_${totalCaptured}_${Math.random().toString(36).slice(2, 7)}`,
         event_type: eventType,
         timestamp_ms: performance.now(),
         key_token: classification.key_token,
@@ -224,8 +393,8 @@
       eventBuffer.push(timingRecord);
       totalCaptured++;
       counterSpan.textContent = totalCaptured;
+      updateTelemetry(totalCaptured, 0, 0);
 
-      // Throttle/batch flush to parent Streamlit frame
       if (!flushTimer) {
         flushTimer = setTimeout(flushEvents, 100);
       }
@@ -240,7 +409,6 @@
       }
     }
 
-    // Attach listeners strictly to the dedicated typing textarea
     textarea.addEventListener('keydown', (e) => {
       queueEvent('down', e);
     });
@@ -249,28 +417,53 @@
       queueEvent('up', e);
     });
 
-    // Handle Streamlit incoming messages
     window.addEventListener('message', (event) => {
       if (event.data && event.data.type === "streamlit:render") {
         const args = event.data.args || {};
+
         if (args.session_active !== undefined) {
           isSessionActive = Boolean(args.session_active);
-          textarea.disabled = !isSessionActive;
+          textarea.disabled = !isSessionActive || sessionPaused;
         }
+
+        if (args.session_paused !== undefined) {
+          sessionPaused = Boolean(args.session_paused);
+          textarea.disabled = !isSessionActive || sessionPaused;
+          if (statusBadge) {
+            statusBadge.style.opacity = (isSessionActive && !sessionPaused) ? "1.0" : "0.6";
+          }
+        }
+
         if (args.prompt_text) {
           promptSpan.textContent = args.prompt_text;
         }
+
         if (args.reset_signal) {
           textarea.value = "";
           eventBuffer = [];
           totalCaptured = 0;
+          sessionPaused = false;
           counterSpan.textContent = "0";
+          updateTelemetry(0, 0, 0);
         }
+
+        if (args.telemetry && typeof args.telemetry === 'object') {
+          const t = args.telemetry;
+          updateTelemetry(
+            t.events_captured !== undefined ? t.events_captured : totalCaptured,
+            t.feature_rows || 0,
+            t.windows_ready || 0
+          );
+        }
+
+        applyVisualState();
         setFrameHeight();
       }
     });
 
-    // Initial setup
+    // Initial state (before any Streamlit render arrives)
+    applyVisualState();
+    updateTelemetry(0, 0, 0);
     setFrameHeight();
     window.addEventListener('resize', setFrameHeight);
   </script>

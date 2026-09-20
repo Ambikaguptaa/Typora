@@ -12,7 +12,10 @@ from src.live_typing.feature_buffer import (
     CANONICAL_SEQUENCE_FEATURES,
     LiveFeatureBuffer,
 )
-from src.live_typing.live_pipeline import LiveTypingPipeline
+try:
+    from src.live_typing.live_pipeline import LiveTypingPipeline
+except ImportError:
+    LiveTypingPipeline = None
 from src.live_typing.privacy_filter import (
     FORBIDDEN_PAYLOAD_FIELDS,
     PrivacyViolationError,
@@ -20,7 +23,7 @@ from src.live_typing.privacy_filter import (
     sanitize_event_batch,
     sanitize_raw_event,
 )
-from src.live_typing.session import LiveTypingSession, SessionStatus
+from src.live_typing.session import LiveTypingSession, SessionState, SessionStatus
 from src.live_typing.validation import validate_session_quality
 
 __all__ = [
@@ -34,6 +37,7 @@ __all__ = [
     "LiveTypingSession",
     "PrivacyViolationError",
     "RawBrowserEvent",
+    "SessionState",
     "SessionStatus",
     "TimingCollector",
     "TypingEvent",

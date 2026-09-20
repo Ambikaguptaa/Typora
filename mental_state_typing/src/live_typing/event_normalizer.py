@@ -30,6 +30,16 @@ class LiveEventNormalizer:
         self._sequence_index = 0
         self._last_backspace_time = None
 
+    def notify_pause(self) -> None:
+        """Handle intentional session pause boundary: discard pending keys and reset flight baseline."""
+        self._pending_downs.clear()
+        self._previous_release_timestamp = None
+        self._last_backspace_time = None
+
+    def notify_resume(self) -> None:
+        """Handle intentional session resume boundary: reset flight baseline so pause interval is not treated as flight."""
+        self._previous_release_timestamp = None
+
     def process_event(self, raw_event: RawBrowserEvent) -> Optional[TypingEvent]:
         """Ingest a single sanitized browser event and return a paired TypingEvent if complete.
 

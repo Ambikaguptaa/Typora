@@ -755,6 +755,19 @@ def init_db(
         with get_db_cursor(db_path=db_path, database_url=database_url) as cursor:
             for stmt in statements:
                 cursor.execute(stmt)
+
+            # Ensure schema migrations for existing databases
+            if not is_postgres:
+                cursor.execute("PRAGMA table_info(sessions);")
+                col_names = {row[1] for row in cursor.fetchall()}
+                if "session_type" not in col_names:
+                    cursor.execute("ALTER TABLE sessions ADD COLUMN session_type TEXT DEFAULT 'ANALYSIS';")
+            else:
+                try:
+                    cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_type TEXT DEFAULT 'ANALYSIS';")
+                except Exception:
+                    pass
+
         logger.info(f"Database schema initialized successfully on {engine_type} backend.")
         return True
     except Exception as e:

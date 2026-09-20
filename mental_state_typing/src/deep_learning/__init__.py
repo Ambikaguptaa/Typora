@@ -28,25 +28,45 @@ from src.deep_learning.label_encoder import (
     load_label_mapping,
     save_label_mapping,
 )
-from src.deep_learning.model import (
-    ModelConfig,
-    build_lstm_classifier,
-    build_placeholder_model,
-)
-from src.deep_learning.predict import (
-    predict_sequence,
-    predict_strain_sequence,
-)
+try:
+    from src.deep_learning.model import (
+        ModelConfig,
+        build_lstm_classifier,
+        build_placeholder_model,
+    )
+except ImportError:
+    ModelConfig = None
+    def _model_stub(*args, **kwargs):
+        raise ImportError("Model operations require the 'tensorflow' package. Install it with: pip install tensorflow")
+    build_lstm_classifier = build_placeholder_model = _model_stub
+
+try:
+    from src.deep_learning.predict import (
+        predict_sequence,
+        predict_strain_sequence,
+    )
+except ImportError:
+    def _predict_stub(*args, **kwargs):
+        raise ImportError("Prediction requires the 'tensorflow' package. Install it with: pip install tensorflow")
+    predict_sequence = predict_strain_sequence = _predict_stub
+
 from src.deep_learning.preprocessing import (
     prepare_grouped_sequences,
     prepare_sequences,
 )
-from src.deep_learning.train import (
-    inspect_real_dataset_availability,
-    set_random_seed,
-    train_lstm_model,
-    train_pipeline_stub,
-)
+try:
+    from src.deep_learning.train import (
+        inspect_real_dataset_availability,
+        set_random_seed,
+        train_lstm_model,
+        train_pipeline_stub,
+    )
+except ImportError:
+    def _train_stub(*args, **kwargs):
+        raise ImportError("Model training requires the 'tensorflow' package. Install it with: pip install tensorflow")
+    set_random_seed = train_lstm_model = train_pipeline_stub = _train_stub
+    inspect_real_dataset_availability = lambda: (False, "tensorflow not installed", {})
+
 from src.deep_learning.training_validation import validate_training_data
 
 __all__ = [

@@ -31,17 +31,27 @@ from src.privacy.differential_privacy import (
     private_count,
     private_mean,
 )
-from src.privacy.encryption import (
-    DecryptionError,
-    decrypt_bytes,
-    decrypt_file,
-    decrypt_json,
-    encrypt_bytes,
-    encrypt_file,
-    encrypt_json,
-    generate_encryption_key,
-    get_fernet,
-)
+try:
+    from src.privacy.encryption import (
+        DecryptionError,
+        decrypt_bytes,
+        decrypt_file,
+        decrypt_json,
+        encrypt_bytes,
+        encrypt_file,
+        encrypt_json,
+        generate_encryption_key,
+        get_fernet,
+    )
+except ImportError:
+    DecryptionError = Exception
+    def _encryption_stub(*args, **kwargs):
+        raise ImportError(
+            "Encryption operations require the 'cryptography' package. "
+            "Install it with: pip install cryptography"
+        )
+    decrypt_bytes = decrypt_file = decrypt_json = encrypt_bytes = encrypt_file = encrypt_json = _encryption_stub
+    generate_encryption_key = get_fernet = _encryption_stub
 from src.privacy.privacy_utils import (
     FORBIDDEN_TEXT_COLUMNS,
     assert_zero_raw_text,

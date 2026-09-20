@@ -45,20 +45,54 @@ def validate_session_quality(
     total_events = len(paired_events)
     duration = session.duration_seconds
 
-    valid_dwell_count = sum(1 for ev in paired_events if ev.dwell_time > 0.0)
-    valid_flight_count = sum(1 for ev in paired_events if ev.flight_time is not None and ev.flight_time >= 0.0)
-
     reasons: List[str] = []
 
+    # 1. Session start check
+    if session.start_time is None:
+        reasons.append("Session was never started.")
+
+    # 2. Minimum event count check
     if total_events < min_events:
         reasons.append(
             f"Insufficient events: {total_events} recorded (minimum {min_events} required)."
         )
 
+    # 3. Minimum duration check
     if duration < min_duration_seconds:
         reasons.append(
             f"Duration too short: {duration:.1f}s elapsed (minimum {min_duration_seconds:.1f}s required)."
         )
+
+    # 4. Monotonicity and physiological micro-timing validity
+    valid_dwell_count = 0
+    valid_flight_count = 0
+    non_finite_count = 0
+    negative_timing_count = 0
+
+    for ev in paired_events:
+        # Finite numbers check
+        if not (ev.dwell_time == ev.dwell_time and abs(ev.dwell_time) != float("inf")):
+            non_finite_count += 1
+            continue
+
+        if ev.dwell_time < 0.0:
+            negative_timing_count += 1
+        elif ev.dwell_time > 0.0:
+            valid_dwell_count += 1
+
+        if ev.flight_time is not None:
+            if not (ev.flight_time == ev.flight_time and abs(ev.flight_time) != float("inf")):
+                non_finite_count += 1
+            elif ev.flight_time < 0.0:
+                negative_timing_count += 1
+            elif ev.flight_time >= 0.0:
+                valid_flight_count += 1
+
+    if non_finite_count > 0:
+        reasons.append(f"Non-finite timing values detected ({non_finite_count} instances).")
+
+    if negative_timing_count > 0:
+        reasons.append(f"Impossible negative timing values detected ({negative_timing_count} instances).")
 
     if valid_dwell_count < min_valid_dwell_events:
         reasons.append(
@@ -82,6 +116,8 @@ def validate_session_quality(
             "duration_seconds": round(duration, 2),
             "valid_dwell_count": valid_dwell_count,
             "valid_flight_count": valid_flight_count,
+            "non_finite_count": non_finite_count,
+            "negative_timing_count": negative_timing_count,
         },
         "thresholds": {
             "min_events": min_events,

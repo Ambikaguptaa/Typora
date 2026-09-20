@@ -78,6 +78,8 @@ from src.integration import (
     load_session_detail,
 )
 from src.live_typing import (
+    SessionState,
+    SessionStatus,
     render_live_typing_box,
     validate_session_quality,
 )
@@ -166,11 +168,19 @@ def render_sidebar(engine: BehavioralEngine) -> str:
             "8. 🔬 Dataset / System Status",
             "9. 🧩 Architecture & Roadmap",
         ]
+        if "selected_nav" not in st.session_state or st.session_state.selected_nav not in nav_options:
+            st.session_state.selected_nav = nav_options[0]
+
+        default_idx = nav_options.index(st.session_state.selected_nav)
+
         selected_nav = st.radio(
             "Select Section",
             options=nav_options,
+            index=default_idx,
             label_visibility="collapsed",
+            key="navigation_radio",
         )
+        st.session_state.selected_nav = selected_nav
 
         st.markdown("<hr style='border: none; border-top: 1px solid #242B36; margin: 14px 0;'>", unsafe_allow_html=True)
 
@@ -436,22 +446,67 @@ def render_overview_page(engine: BehavioralEngine) -> None:
 # ==============================================================================
 def render_live_session_page(engine: BehavioralEngine) -> None:
     """Render the controlled live typing capture workstation, telemetry, and charts."""
+    curr_state = engine.session.state
+
+    # Dynamic status indicator strictly matching the authoritative state machine
+    if curr_state == SessionState.CAPTURING:
+        hdr_status_text = "STATUS: CAPTURING"
+        hdr_status_type = "active"
+    elif curr_state == SessionState.PAUSED:
+        hdr_status_text = "STATUS: PAUSED"
+        hdr_status_type = "warning"
+    elif curr_state in (SessionState.STOPPING, SessionState.VALIDATING):
+        hdr_status_text = f"STATUS: {curr_state.value}"
+        hdr_status_type = "warning"
+    elif curr_state == SessionState.COMPLETED:
+        hdr_status_text = "STATUS: COMPLETED"
+        hdr_status_type = "ready"
+    elif curr_state == SessionState.ERROR:
+        hdr_status_text = "STATUS: ERROR"
+        hdr_status_type = "critical"
+    else:
+        hdr_status_text = "CAPTURE ENGINE READY"
+        hdr_status_type = "ready"
+
     render_console_header(
         title="Live Behavioral Session Deck",
         subtitle="Controlled Keystroke Dynamics Acquisition, Micro-Timing Telemetry & Quality Audit",
-        status_text="CAPTURE ENGINE READY",
-        status_type="ready",
+        status_text=hdr_status_text,
+        status_type=hdr_status_type,
     )
+
+    # Active Session Indicator Banner
+    if curr_state in (SessionState.CAPTURING, SessionState.PAUSED):
+        st.markdown(
+            f"""
+            <div class="console-card" style="border-left: 4px solid #35D6FF; background: #131720; margin-bottom: 12px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+                    <div>
+                        <span style="font-size: 0.72rem; color: #35D6FF; font-weight: 700; letter-spacing: 0.06em;">CAPTURE ENGINE ACTIVE</span>
+                        <div style="font-size: 1.15rem; font-weight: 700; color: #FFFFFF; margin-top: 2px;">
+                            STATUS: <span style="color: {'#35D6FF' if curr_state == SessionState.CAPTURING else '#FFB84D'}">{curr_state.value}</span>
+                        </div>
+                    </div>
+                    <div style="text-align: right; font-size: 0.85rem; color: #8B949E;">
+                        SESSION: <code style="color: #35D6FF;">{engine.session.session_id[:8]}...{engine.session.session_id[-4:]}</code>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     # Dual Session Mode Selector
     st.markdown('<div class="console-card">', unsafe_allow_html=True)
     col_mode, col_mode_desc = st.columns([1, 2])
     with col_mode:
         current_type_idx = 0 if engine.session_type == SessionType.ANALYSIS else 1
+        mode_disabled = (curr_state in (SessionState.CAPTURING, SessionState.PAUSED))
         mode_selection = st.radio(
             "Select Session Protocol",
             options=["🔬 Analysis Session", "📊 Calibration Session"],
             index=current_type_idx,
+            disabled=mode_disabled,
             help="Calibration sessions accumulate your baseline history (requires 5). Analysis sessions evaluate divergence.",
         )
         if mode_selection == "📊 Calibration Session":
@@ -486,15 +541,20 @@ def render_live_session_page(engine: BehavioralEngine) -> None:
         st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # Authoritative State Machine Button Guards
+    btn_start_disabled = (curr_state not in (SessionState.READY, SessionState.COMPLETED))
+    btn_pause_disabled = (curr_state != SessionState.CAPTURING)
+    btn_resume_disabled = (curr_state != SessionState.PAUSED)
+    btn_stop_disabled = (curr_state not in (SessionState.CAPTURING, SessionState.PAUSED))
+    btn_reset_disabled = (curr_state in (SessionState.STOPPING, SessionState.VALIDATING))
+
     # Physical Control Deck
     st.markdown('<div class="console-card">', unsafe_allow_html=True)
     st.markdown(
-        """
+        f"""
         <div class="console-card-header">
             <span>PHYSICAL CONTROL DECK</span>
-            <span style="font-size: 0.72rem; color: #8993A4;">STATUS: <code>"""
-        + engine.state.value
-        + """</code></span>
+            <span style="font-size: 0.72rem; color: #8993A4;">STATUS: <code>{curr_state.value}</code></span>
         </div>
         """,
         unsafe_allow_html=True,
@@ -502,29 +562,33 @@ def render_live_session_page(engine: BehavioralEngine) -> None:
 
     c_start, c_pause, c_resume, c_stop, c_reset = st.columns(5)
     with c_start:
-        if st.button("▶ START SESSION", use_container_width=True, key="live_btn_start"):
-            sid = engine.start_session()
+        if st.button("▶ START SESSION", use_container_width=True, key="live_btn_start", disabled=btn_start_disabled):
+            st.session_state["canvas_reset_signal"] = True
+            if "last_assessment" in st.session_state:
+                del st.session_state["last_assessment"]
+            engine.start_session()
             st.rerun()
 
     with c_pause:
-        if st.button("⏸ PAUSE", use_container_width=True, key="live_btn_pause"):
+        if st.button("⏸ PAUSE", use_container_width=True, key="live_btn_pause", disabled=btn_pause_disabled):
             engine.pause_session()
             st.rerun()
 
     with c_resume:
-        if st.button("▶ RESUME", use_container_width=True, key="live_btn_resume"):
+        if st.button("▶ RESUME", use_container_width=True, key="live_btn_resume", disabled=btn_resume_disabled):
             engine.resume_session()
             st.rerun()
 
     with c_stop:
-        if st.button("⏹ STOP & VALIDATE", use_container_width=True, key="live_btn_stop"):
+        if st.button("⏹ STOP & VALIDATE", use_container_width=True, key="live_btn_stop", disabled=btn_stop_disabled):
             res = engine.stop_session()
             st.session_state["last_assessment"] = res
             st.rerun()
 
     with c_reset:
-        if st.button("🔄 RESET", use_container_width=True, key="live_btn_reset"):
+        if st.button("🔄 RESET", use_container_width=True, key="live_btn_reset", disabled=btn_reset_disabled):
             engine.reset_session()
+            st.session_state["canvas_reset_signal"] = True
             if "last_assessment" in st.session_state:
                 del st.session_state["last_assessment"]
             st.rerun()
@@ -543,8 +607,30 @@ def render_live_session_page(engine: BehavioralEngine) -> None:
         unsafe_allow_html=True,
     )
 
-    raw_events = render_live_typing_box(key="live_deck_canvas")
-    if raw_events:
+    reset_sig = st.session_state.get("canvas_reset_signal", False)
+    if reset_sig:
+        st.session_state["canvas_reset_signal"] = False
+
+    canvas_active_state = curr_state in (SessionState.CAPTURING, SessionState.PAUSED)
+    canvas_paused_state = (curr_state == SessionState.PAUSED)
+
+    _tel = engine.feature_buffer.extract_telemetry()
+    _paired_count = len(engine.session.get_paired_events())
+    _seq_w, _ = engine.feature_buffer.generate_sequence_windows()
+    canvas_telemetry = {
+        "events_captured": engine.session.event_count,
+        "feature_rows": _paired_count,
+        "windows_ready": len(_seq_w),
+    }
+
+    raw_events = render_live_typing_box(
+        session_active=canvas_active_state,
+        session_paused=canvas_paused_state,
+        reset_signal=reset_sig,
+        telemetry=canvas_telemetry,
+        key="live_deck_canvas",
+    )
+    if raw_events and curr_state == SessionState.CAPTURING:
         try:
             added = engine.ingest_raw_events(raw_events, strict_privacy=True)
         except Exception as e:
@@ -556,6 +642,8 @@ def render_live_session_page(engine: BehavioralEngine) -> None:
     telemetry = engine.feature_buffer.extract_telemetry()
     paired_count = len(engine.session.get_paired_events())
     active_s = engine.session.get_active_duration_seconds()
+    seq_windows, _ = engine.feature_buffer.generate_sequence_windows()
+    windows_count = len(seq_windows)
 
     st.markdown('<div class="console-card">', unsafe_allow_html=True)
     st.markdown(
@@ -566,18 +654,17 @@ def render_live_session_page(engine: BehavioralEngine) -> None:
         """,
         unsafe_allow_html=True,
     )
+    col_c1, col_c2, col_c3, col_c4 = st.columns(4)
+    col_c1.metric("Events Captured", f"{engine.session.event_count}")
+    col_c2.metric("Feature Rows", f"{len(engine.feature_buffer.get_events())}")
+    col_c3.metric("Model Windows Ready", f"{windows_count} × [30, 6]")
+    col_c4.metric("Active Duration", f"{active_s:.1f} s")
+
     col_t1, col_t2, col_t3, col_t4 = st.columns(4)
-    col_t1.metric("Active Duration", f"{active_s:.1f} s")
     col_t1.metric("Mean Dwell Time", f"{telemetry.get('mean_dwell_ms', 0.0):.1f} ms")
-
-    col_t2.metric("Valid Paired Events", f"{paired_count}")
     col_t2.metric("Mean Flight Time", f"{telemetry.get('mean_flight_ms', 0.0):.1f} ms")
-
     col_t3.metric("Typing Cadence", f"{telemetry.get('estimated_wpm', 0.0):.1f} WPM")
-    col_t3.metric("Pause Rate", f"{telemetry.get('pause_rate', 0.0) * 100:.1f}%")
-
-    col_t4.metric("Corrections (Backspaces)", f"{telemetry.get('backspace_count', 0)}")
-    col_t4.metric("Sequence Windows", f"{telemetry.get('sequence_windows_count', 0)} × [30, 6]")
+    col_t4.metric("Pause Rate", f"{telemetry.get('pause_rate', 0.0) * 100:.1f}%")
     st.markdown("</div>", unsafe_allow_html=True)
 
     # Dynamic Interactive Visualizations
@@ -660,7 +747,11 @@ def render_live_session_page(engine: BehavioralEngine) -> None:
         st.markdown("</div>", unsafe_allow_html=True)
 
     if not is_valid and q_details.get("reasons"):
-        st.caption("Criteria requirements: ≥ 15 paired events, ≥ 3.0 seconds duration, valid positive dwell & flight intervals.")
+        st.markdown('<div style="margin-top: 10px; padding: 8px 12px; background: rgba(255, 184, 77, 0.08); border-radius: 6px; border: 1px solid rgba(255, 184, 77, 0.2);">', unsafe_allow_html=True)
+        st.markdown('<div style="font-size: 0.75rem; font-weight: 700; color: #FFB84D; margin-bottom: 4px;">QUALITY DEFICIENCIES IDENTIFIED:</div>', unsafe_allow_html=True)
+        for r in q_details["reasons"]:
+            st.markdown(f'<div style="font-size: 0.8rem; color: #E6EDF3;">• {r}</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1481,9 +1572,18 @@ def main() -> None:
     """Main application orchestrator."""
     print("[STARTUP STEP 6] Initializing singleton BehavioralEngine state...", flush=True)
     engine = get_engine()
+
     print("[STARTUP STEP 7] Rendering workstation sidebar...", flush=True)
-    safe_nav = selected_nav.encode("ascii", "replace").decode("ascii")
+    selected_nav = render_sidebar(engine)
+
+    # Determine current navigation selection and guarantee a valid string value
+    if not selected_nav or not isinstance(selected_nav, str):
+        selected_nav = st.session_state.get("selected_nav", "1. 📋 Overview")
+
+    # Sanitize for safe console/log rendering across all platform encodings
+    safe_nav = str(selected_nav).encode("ascii", "replace").decode("ascii")
     print(f"[STARTUP STEP 10] Rendering active workstation console page: {safe_nav}...", flush=True)
+
     if "Overview" in selected_nav or selected_nav.startswith("1."):
         render_overview_page(engine)
     elif "Live" in selected_nav or selected_nav.startswith("2.") or "Assessment" in selected_nav or "Session" in selected_nav:

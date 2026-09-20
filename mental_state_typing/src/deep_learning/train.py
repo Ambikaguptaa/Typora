@@ -20,6 +20,8 @@ CRITICAL SCIENTIFIC SAFETY RULES:
   must pass before training commences.
 """
 
+from __future__ import annotations
+
 import argparse
 from datetime import datetime, timezone
 import hashlib
@@ -32,7 +34,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 from sklearn.utils.class_weight import compute_class_weight
-import tensorflow as tf
+try:
+    import tensorflow as tf
+    HAS_TF = True
+except ImportError:
+    tf = None
+    HAS_TF = False
 
 from src.config.settings import settings
 from src.data_engineering.canonical_schema import validate_canonical_dataframe
