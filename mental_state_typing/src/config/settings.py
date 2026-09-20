@@ -65,6 +65,8 @@ class Settings:
             if hasattr(st, "secrets"):
                 if "DATABASE_URL" in st.secrets:
                     return str(st.secrets["DATABASE_URL"])
+                if "database_url" in st.secrets:
+                    return str(st.secrets["database_url"])
                 if "postgres" in st.secrets and isinstance(st.secrets["postgres"], dict):
                     pg = st.secrets["postgres"]
                     if "url" in pg:

@@ -19,12 +19,14 @@ import pytest
 from database.database import (
     check_connection,
     delete_assessment_record,
+    extract_safe_db_diagnostics,
     get_assessment_by_id,
     get_assessment_records,
     get_baseline_profile,
     get_connection,
     get_db_cursor,
     init_db,
+    log_database_diagnostics,
     parse_database_url,
     record_audit_log,
     sanitize_database_url_for_logging,
@@ -249,3 +251,68 @@ def test_audit_log_recording(temp_db: Path):
         assert row["event_type"] == "DATA_PURGE"
         assert row["user_id"] == "usr_anonymous_123"
         assert "Purged session" in row["details"]
+
+
+def test_extract_safe_db_diagnostics_masks_credentials():
+    """Verify extract_safe_db_diagnostics extracts only safe metadata without password."""
+    url = "postgresql://my_user:ultra_secret_pass_999@db.supabase.co:5432/my_database"
+    diag = extract_safe_db_diagnostics(url, "postgresql")
+
+    assert diag["backend_type"] == "postgresql"
+    assert diag["host"] == "db.supabase.co"
+    assert diag["port"] == 5432
+    assert diag["database_name"] == "my_database"
+    assert diag["username"] == "my_user"
+    assert diag["has_database_url"] is True
+    # Ensure password is not present anywhere in the dict values
+    assert "ultra_secret_pass_999" not in str(diag)
+
+
+def test_log_database_diagnostics_format(capsys):
+    """Verify log_database_diagnostics outputs the exact 8 required fields and masks passwords."""
+    log_database_diagnostics(
+        backend_type="postgresql",
+        host="aws-0-us-east-1.pooler.supabase.com",
+        port=5432,
+        database_name="postgres",
+        username="postgres.myproject",
+        has_database_url=True,
+        exc_type="OperationalError",
+        exc_message="connection timeout",
+    )
+    captured = capsys.readouterr()
+    stderr = captured.err
+
+    assert "Backend Type: postgresql" in stderr
+    assert "Host: aws-0-us-east-1.pooler.supabase.com" in stderr
+    assert "Port: 5432" in stderr
+    assert "Database Name: postgres" in stderr
+    assert "Username: postgres.myproject" in stderr
+    assert "DATABASE_URL Exists: True" in stderr
+    assert "psycopg2 Exception Type: OperationalError" in stderr
+    assert "psycopg2 Exception Message: connection timeout" in stderr
+
+
+def test_postgres_connection_failure_diagnostic_logging(capsys):
+    """Verify that PostgreSQL connection failure logs safe diagnostics and conceals password."""
+    unreachable_url = "postgresql://user_diag:super_secret_password_777@127.0.0.1:54329/fail_db"
+    
+    with pytest.raises(Exception) as exc_info:
+        get_connection(database_url=unreachable_url)
+
+    captured = capsys.readouterr()
+    stderr = captured.err
+
+    # Verify diagnostic block is printed to stderr
+    assert "=== DATABASE CONNECTION DIAGNOSTIC ===" in stderr
+    assert "Backend Type: postgresql" in stderr
+    assert "Host: 127.0.0.1" in stderr
+    assert "Port: 54329" in stderr
+    assert "Database Name: fail_db" in stderr
+    assert "Username: user_diag" in stderr
+    assert "DATABASE_URL Exists: True" in stderr
+    assert "psycopg2 Exception Type: OperationalError" in stderr
+
+    # CRITICAL INVARIANT: Password must NEVER appear in output
+    assert "super_secret_password_777" not in stderr
+

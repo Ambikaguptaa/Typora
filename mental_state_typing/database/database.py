@@ -17,7 +17,9 @@ import logging
 from pathlib import Path
 import re
 import sqlite3
+import sys
 from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from urllib.parse import urlparse
 
 from src.config.settings import settings
 from src.live_typing.privacy_filter import (
@@ -37,6 +39,76 @@ def sanitize_database_url_for_logging(url: str) -> str:
     return re.sub(r"://([^:]+):([^@]+)@", r"://\1:********@", url)
 
 
+def extract_safe_db_diagnostics(target: str, engine_type: str) -> Dict[str, Any]:
+    """Extract safe database metadata for diagnostic logging without exposing passwords.
+
+    Returns dictionary containing only:
+    - backend_type
+    - host (with password removed)
+    - port
+    - database_name
+    - username (with password removed)
+    - has_database_url (boolean)
+    """
+    if not target or engine_type == "sqlite":
+        return {
+            "backend_type": "sqlite",
+            "host": "localhost",
+            "port": "N/A",
+            "database_name": target or str(settings.database_path),
+            "username": "local",
+            "has_database_url": bool(target),
+        }
+
+    try:
+        parsed = urlparse(target)
+        return {
+            "backend_type": engine_type,
+            "host": parsed.hostname or "unknown",
+            "port": parsed.port or 5432,
+            "database_name": parsed.path.lstrip("/") if parsed.path else "unknown",
+            "username": parsed.username or "unknown",
+            "has_database_url": bool(target),
+        }
+    except Exception:
+        return {
+            "backend_type": engine_type,
+            "host": "parse_error",
+            "port": 5432,
+            "database_name": "unknown",
+            "username": "unknown",
+            "has_database_url": bool(target),
+        }
+
+
+def log_database_diagnostics(
+    backend_type: str,
+    host: Optional[str],
+    port: Optional[Union[int, str]],
+    database_name: Optional[str],
+    username: Optional[str],
+    has_database_url: bool,
+    exc_type: Optional[str] = None,
+    exc_message: Optional[str] = None,
+) -> None:
+    """Print and log safe database connection diagnostics with no passwords exposed."""
+    msg_lines = [
+        "=== DATABASE CONNECTION DIAGNOSTIC ===",
+        f"Backend Type: {backend_type}",
+        f"Host: {host or 'N/A'}",
+        f"Port: {port or 'N/A'}",
+        f"Database Name: {database_name or 'N/A'}",
+        f"Username: {username or 'N/A'}",
+        f"DATABASE_URL Exists: {has_database_url}",
+        f"psycopg2 Exception Type: {exc_type or 'None'}",
+        f"psycopg2 Exception Message: {exc_message or 'None'}",
+        "======================================",
+    ]
+    formatted = "\n".join(msg_lines)
+    logger.info(formatted)
+    print(formatted, file=sys.stderr, flush=True)
+
+
 def parse_database_url(url: Optional[str] = None) -> Tuple[str, str]:
     """Determine the engine type ('sqlite' or 'postgresql') and target path/connection string.
 
@@ -48,6 +120,20 @@ def parse_database_url(url: Optional[str] = None) -> Tuple[str, str]:
     """
     db_url = url or settings.get_database_url()
     if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
+        # Normalize postgres:// to postgresql:// for driver compatibility
+        if db_url.startswith("postgres://"):
+            db_url = "postgresql://" + db_url[len("postgres://") :]
+
+        # Ensure sslmode=require for cloud PostgreSQL if not already specified
+        if "sslmode=" not in db_url:
+            delim = "&" if "?" in db_url else "?"
+            db_url = f"{db_url}{delim}sslmode=require"
+
+        # Ensure connect_timeout=10 if not already specified to avoid indefinite hangs
+        if "connect_timeout=" not in db_url:
+            delim = "&" if "?" in db_url else "?"
+            db_url = f"{db_url}{delim}connect_timeout=10"
+
         return "postgresql", db_url
 
     # Normalize sqlite URL: sqlite:///path/to/file or sqlite:///:memory:
@@ -89,24 +175,107 @@ def get_connection(
     engine_type, target = parse_database_url(database_url)
 
     if engine_type == "postgresql":
+        diag = extract_safe_db_diagnostics(target, engine_type)
+
+        # Check for direct Supabase IPv6 host
+        host = str(diag.get("host", ""))
+        if host.endswith(".supabase.co") and not host.startswith("aws-0-") and "pooler" not in host:
+            warning_msg = (
+                f"[DATABASE CONFIGURATION WARNING] Host '{host}' appears to be a direct Supabase endpoint (*.supabase.co).\n"
+                "Direct Supabase endpoints resolve only over IPv6, which is NOT supported by Streamlit Community Cloud.\n"
+                "Please configure the Supabase Session Pooler host (aws-0-[region].pooler.supabase.com) on port 5432 instead."
+            )
+            logger.warning(warning_msg)
+            print(warning_msg, file=sys.stderr, flush=True)
+
         try:
             import psycopg2
             import psycopg2.extras
-
-            conn = psycopg2.connect(target)
-            conn.autocommit = False
-            return conn
         except ImportError:
             try:
                 import psycopg
 
                 conn = psycopg.connect(target)
+                log_database_diagnostics(
+                    backend_type="postgresql",
+                    host=diag["host"],
+                    port=diag["port"],
+                    database_name=diag["database_name"],
+                    username=diag["username"],
+                    has_database_url=diag["has_database_url"],
+                )
                 return conn
             except ImportError:
+                log_database_diagnostics(
+                    backend_type="postgresql",
+                    host=diag["host"],
+                    port=diag["port"],
+                    database_name=diag["database_name"],
+                    username=diag["username"],
+                    has_database_url=diag["has_database_url"],
+                    exc_type="ImportError",
+                    exc_message="psycopg2 and psycopg drivers are not installed.",
+                )
                 raise ImportError(
                     "PostgreSQL driver (psycopg2 or psycopg) is required for PostgreSQL backend. "
                     "Install psycopg2-binary or configure a local SQLite database."
                 )
+
+        # Log safe diagnostics prior to connection attempt so configuration is immediately visible in Streamlit logs
+        log_database_diagnostics(
+            backend_type="postgresql",
+            host=diag["host"],
+            port=diag["port"],
+            database_name=diag["database_name"],
+            username=diag["username"],
+            has_database_url=diag["has_database_url"],
+            exc_type=None,
+            exc_message=None,
+        )
+
+        try:
+            conn = psycopg2.connect(
+                target,
+                connect_timeout=10,
+                cursor_factory=psycopg2.extras.DictCursor,
+            )
+            conn.autocommit = False
+            logger.info("[DATABASE SUCCESS] PostgreSQL connection established successfully.")
+            return conn
+        except Exception as pg_err:
+            exc_type = type(pg_err).__name__
+            raw_msg = str(pg_err).strip()
+            exc_msg = sanitize_database_url_for_logging(raw_msg)
+            try:
+                parsed = urlparse(target)
+                if parsed.password and parsed.password in exc_msg:
+                    exc_msg = exc_msg.replace(parsed.password, "********")
+            except Exception:
+                pass
+
+            log_database_diagnostics(
+                backend_type="postgresql",
+                host=diag["host"],
+                port=diag["port"],
+                database_name=diag["database_name"],
+                username=diag["username"],
+                has_database_url=diag["has_database_url"],
+                exc_type=exc_type,
+                exc_message=exc_msg,
+            )
+            if host.endswith(".supabase.co") and not host.startswith("aws-0-") and "pooler" not in host:
+                pooler_advice = (
+                    "[DATABASE CONFIGURATION FIX]\n"
+                    "Direct connection to db.*.supabase.co failed. Streamlit Community Cloud lacks IPv6 routing.\n"
+                    "To fix this in Supabase:\n"
+                    "1. Go to Supabase Dashboard > Project Settings > Database > Connection Pooling.\n"
+                    "2. Select 'Session' mode on port 5432 (e.g. host: aws-0-[region].pooler.supabase.com).\n"
+                    "3. Update DATABASE_URL in Streamlit Cloud Secrets with username 'postgres.[project-ref]':\n"
+                    "   DATABASE_URL = 'postgresql://postgres.[project-ref]:[PASSWORD]@aws-0-[region].pooler.supabase.com:5432/postgres?sslmode=require'\n"
+                )
+                logger.error(pooler_advice)
+                print(pooler_advice, file=sys.stderr, flush=True)
+            raise
     else:
         # SQLite
         if target != ":memory:":
@@ -116,6 +285,44 @@ def get_connection(
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
         return conn
+
+
+class DialectCursorWrapper:
+    """Cursor wrapper providing unified parameter translation across SQLite ('?') and PostgreSQL ('%s')."""
+
+    def __init__(self, raw_cursor: Any, is_postgres: bool = False):
+        self._cursor = raw_cursor
+        self._is_postgres = is_postgres
+
+    def execute(self, query: str, params: Optional[Union[tuple, list, dict]] = None) -> Any:
+        if self._is_postgres and params is not None and isinstance(params, (tuple, list)):
+            # Translate SQLite '?' parameter placeholders to PostgreSQL '%s'
+            query = query.replace("?", "%s")
+        if params is not None:
+            return self._cursor.execute(query, params)
+        return self._cursor.execute(query)
+
+    def fetchone(self) -> Any:
+        return self._cursor.fetchone()
+
+    def fetchall(self) -> List[Any]:
+        return self._cursor.fetchall()
+
+    def fetchmany(self, size: Optional[int] = None) -> List[Any]:
+        return self._cursor.fetchmany(size) if size else self._cursor.fetchmany()
+
+    @property
+    def rowcount(self) -> int:
+        return self._cursor.rowcount
+
+    def close(self) -> None:
+        return self._cursor.close()
+
+    def __iter__(self) -> Generator[Any, None, None]:
+        return iter(self._cursor)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
 
 
 @contextmanager
@@ -130,12 +337,16 @@ def get_db_cursor(
         database_url: Optional database connection string.
 
     Yields:
-        Database cursor.
+        Database cursor (wrapped for cross-dialect compatibility).
     """
     conn = get_connection(db_path=db_path, database_url=database_url)
+    engine_type, _ = parse_database_url(database_url if db_path is None else f"sqlite:///{db_path}")
+    is_postgres = (engine_type == "postgresql") and (db_path is None)
+
     cursor = conn.cursor()
+    wrapped = DialectCursorWrapper(cursor, is_postgres=is_postgres)
     try:
-        yield cursor
+        yield wrapped
         conn.commit()
     except Exception as e:
         conn.rollback()
@@ -143,7 +354,7 @@ def get_db_cursor(
         logger.error(f"Database operation failed: {safe_msg}")
         raise
     finally:
-        cursor.close()
+        wrapped.close()
         conn.close()
 
 
@@ -233,7 +444,8 @@ def _get_schema_statements(is_postgres: bool = False) -> List[str]:
 def init_db(
     db_path: Optional[Union[str, Path]] = None,
     database_url: Optional[str] = None,
-) -> None:
+    raise_on_error: bool = False,
+) -> bool:
     """Initialize database tables across SQLite or PostgreSQL backends.
 
     Creates tables:
@@ -248,11 +460,18 @@ def init_db(
 
     statements = _get_schema_statements(is_postgres=is_postgres)
 
-    with get_db_cursor(db_path=db_path, database_url=database_url) as cursor:
-        for stmt in statements:
-            cursor.execute(stmt)
-
-    logger.info(f"Database schema initialized successfully on {engine_type} backend.")
+    try:
+        with get_db_cursor(db_path=db_path, database_url=database_url) as cursor:
+            for stmt in statements:
+                cursor.execute(stmt)
+        logger.info(f"Database schema initialized successfully on {engine_type} backend.")
+        return True
+    except Exception as e:
+        safe_msg = sanitize_database_url_for_logging(str(e))
+        logger.error(f"Database schema initialization failed: {safe_msg}")
+        if raise_on_error:
+            raise
+        return False
 
 
 def check_connection(

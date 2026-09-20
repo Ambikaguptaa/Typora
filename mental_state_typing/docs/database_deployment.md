@@ -86,16 +86,30 @@ When deploying the application to Streamlit Community Cloud:
 
 ```toml
 # Streamlit Secrets (.streamlit/secrets.toml)
-DATABASE_URL = "postgresql://username:your_password@ep-host-12345.region.aws.neon.tech/mental_state?sslmode=require"
+# Example for Supabase (Session Pooler on port 5432):
+DATABASE_URL = "postgresql://postgres.yourprojectref:your_password@aws-0-us-east-1.pooler.supabase.com:5432/postgres?sslmode=require"
 
-# Optional: Individual credentials dictionary
+# Alternatively, configure via the postgres dictionary:
 [postgres]
-user = "username"
+user = "postgres.yourprojectref"
 password = "your_password"
-host = "ep-host-12345.region.aws.neon.tech"
+host = "aws-0-us-east-1.pooler.supabase.com"
 port = 5432
-dbname = "mental_state"
+dbname = "postgres"
 ```
+
+### 3.1 Supabase Configuration Notes (IPv6 vs IPv4 Session Pooler)
+> [!IMPORTANT]
+> **Direct Supabase endpoints (`db.<project-ref>.supabase.co:5432`) resolve only via IPv6.**  
+> Streamlit Community Cloud runs in AWS environments without outbound IPv6 routing. Attempting to use the direct host will result in connection timeouts or `could not translate host name "db.<ref>.supabase.co"` / `Network is unreachable`.
+> 
+> **Solution**:
+> 1. In your Supabase Dashboard, go to **Project Settings > Database > Connection Pooling**.
+> 2. Select **Session** mode.
+> 3. Use port **5432**.
+> 4. Ensure username is `postgres.[your-project-ref]`.
+> 5. Host is `aws-0-[region].pooler.supabase.com`.
+> 6. Append `?sslmode=require`.
 
 3. `Settings.get_database_url()` automatically discovers `st.secrets["DATABASE_URL"]` or `st.secrets["postgres"]` and switches the storage backend to PostgreSQL.
 4. If no cloud secrets are found, the system gracefully falls back to local SQLite at `database/mental_state.db`.
